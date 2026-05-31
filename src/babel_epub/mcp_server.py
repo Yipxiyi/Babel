@@ -27,12 +27,13 @@ def tool(name: str, description: str, properties: dict[str, Any], required: list
 TOOLS = [
     tool(
         "prepare_epub",
-        "Prepare an ebook workspace from a local file path. Inputs are normalized to EPUB internally.",
+        "Prepare an ebook workspace from a local file path and choose the final output format.",
         {
             "path": {"type": "string"},
             "target_language": {"type": "string", "default": "Simplified Chinese"},
             "title": {"type": "string"},
             "language": {"type": "string", "default": "zh-CN"},
+            "output_format": {"type": "string", "default": "epub"},
         },
         ["path"],
     ),
@@ -73,7 +74,7 @@ class BabelMCP:
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "babel-mcp", "version": "0.3.0"},
+                    "serverInfo": {"name": "babel-mcp", "version": "0.4.0"},
                 },
             }
         if method == "notifications/initialized":
@@ -109,6 +110,7 @@ class BabelMCP:
                     target_language=arguments.get("target_language", "Simplified Chinese"),
                     title=arguments.get("title", ""),
                     language=arguments.get("language", "zh-CN"),
+                    output_format=arguments.get("output_format", "epub"),
                 )
             )
             return {"job": job.to_dict(include_paths=True), "glossary": self.engine.read_glossary(job.job_id)}

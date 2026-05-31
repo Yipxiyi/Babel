@@ -145,6 +145,10 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("第一章", content)
             self.assertIn("你好，", content)
             self.assertIn("<dc:language>zh-CN</dc:language>", opf)
+            self.assertIn(
+                '"output_format": ".epub"',
+                (work_dir / "pipeline" / "output_format.json").read_text(encoding="utf-8"),
+            )
 
     def test_placeholder_translation_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

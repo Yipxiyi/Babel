@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 - 2026-06-01
+
+### Added
+
+- User-selectable final output formats for CLI, Web, job engine, and Claude MCP workflows.
+- Native EPUB output remains dependency-free; `.mobi`, `.azw3`, `.pdf`, `.docx`, `.txt`, `.html`, `.htmlz`, `.kepub`, `.rtf`, and `.fb2` export use Calibre `ebook-convert`.
+- Output format metadata at `pipeline/output_format.json`.
+- Web UI output format selector and generic output download flow.
+- Validation that rejects missing or mismatched `--output-format` and output file suffix combinations.
+
 ## 0.3.0 - 2026-06-01
 
 ### Added

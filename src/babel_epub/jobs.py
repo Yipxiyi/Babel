@@ -18,6 +18,7 @@ from .pipeline import (
     read_jsonl,
     write_jsonl,
 )
+from .formats import BookFormatError, normalize_extension, supported_output_extensions
 from .providers import ProviderSettings, TranslationProvider, make_provider
 
 
@@ -31,6 +32,7 @@ class JobRequest:
     target_language: str = "Simplified Chinese"
     title: str = ""
     language: str = "zh-CN"
+    output_format: str = ".epub"
     max_blocks: int = 80
 
 
@@ -43,6 +45,7 @@ class BabelJob:
     target_language: str
     title: str
     language: str
+    output_format: str
     work_dir: Path
     input_epub: Path
     glossary_path: Path
@@ -51,18 +54,19 @@ class BabelJob:
     block_count: int = 0
     message: str = ""
     output_epub: Path | None = None
+    output_book: Path | None = None
     audit_path: Path | None = None
     report_path: Path | None = None
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self, include_paths: bool = True) -> dict:
         data = asdict(self)
-        for key in ("work_dir", "input_epub", "glossary_path", "output_epub", "audit_path", "report_path"):
+        for key in ("work_dir", "input_epub", "glossary_path", "output_epub", "output_book", "audit_path", "report_path"):
             value = data.get(key)
             if value is not None:
                 data[key] = str(value)
         if not include_paths:
-            for key in ("work_dir", "input_epub", "glossary_path", "output_epub", "audit_path", "report_path"):
+            for key in ("work_dir", "input_epub", "glossary_path", "output_epub", "output_book", "audit_path", "report_path"):
                 data.pop(key, None)
         return data
 
@@ -104,6 +108,7 @@ class BabelJobEngine:
             target_language=data["target_language"],
             title=data.get("title", ""),
             language=data.get("language", "zh-CN"),
+            output_format=data.get("output_format", ".epub"),
             work_dir=Path(data["work_dir"]),
             input_epub=Path(data["input_epub"]),
             glossary_path=Path(data["glossary_path"]),
@@ -112,6 +117,7 @@ class BabelJobEngine:
             block_count=int(data.get("block_count", 0)),
             message=data.get("message", ""),
             output_epub=Path(data["output_epub"]) if data.get("output_epub") else None,
+            output_book=Path(data["output_book"]) if data.get("output_book") else None,
             audit_path=Path(data["audit_path"]) if data.get("audit_path") else None,
             report_path=Path(data["report_path"]) if data.get("report_path") else None,
             errors=list(data.get("errors", [])),
@@ -133,6 +139,11 @@ class BabelJobEngine:
     def create_job(self, request: JobRequest) -> BabelJob:
         job_id = uuid.uuid4().hex[:12]
         work_dir = self.data_dir / job_id
+        output_format = normalize_extension(request.output_format, ".epub")
+        if output_format not in supported_output_extensions():
+            raise BookFormatError(
+                f"unsupported output format: {output_format}. Supported: {', '.join(supported_output_extensions())}"
+            )
         extension = Path(request.filename).suffix.lower() or ".book"
         input_book = work_dir / f"upload{extension}"
         glossary_path = work_dir / "translation_glossary.md"
@@ -161,6 +172,7 @@ class BabelJobEngine:
             target_language=request.target_language,
             title=request.title,
             language=request.language,
+            output_format=output_format,
             work_dir=work_dir,
             input_epub=work_dir / "input.epub",
             glossary_path=glossary_path,
@@ -227,10 +239,15 @@ class BabelJobEngine:
 
             command_validate_batches(Namespace(pipeline_dir=pipeline_dir))
             output_epub = job.work_dir / "output.epub"
+            output_format = normalize_extension(job.output_format, ".epub")
+            output_book = job.work_dir / f"output{output_format}"
             command_apply(
                 Namespace(
                     work_dir=job.work_dir,
-                    output_epub=output_epub,
+                    output_book=output_book,
+                    output_epub=None,
+                    output_format=output_format,
+                    converter_path=None,
                     title=job.title or None,
                     language=job.language,
                 )
@@ -241,13 +258,15 @@ class BabelJobEngine:
             command_report(
                 Namespace(
                     work_dir=job.work_dir,
-                    output_epub=output_epub,
+                    output_book=output_book,
+                    output_epub=None,
                     glossary=job.glossary_path,
                     report=report_path,
                 )
             )
             job.status = "completed"
             job.output_epub = output_epub
+            job.output_book = output_book
             job.audit_path = audit_path
             job.report_path = report_path
             job.message = "Completed."

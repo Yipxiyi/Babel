@@ -36,4 +36,6 @@ See `claude_desktop_config.example.json`.
 - `job_status`
 - `update_glossary`
 
-The MCP server is local-first. Book content and translated outputs remain in `BABEL_DATA_DIR`. EPUB is handled directly; TXT/HTML are converted internally; MOBI/AZW/PDF/DOCX/CBZ and similar formats require Calibre `ebook-convert`.
+The MCP server is local-first. Book content and translated outputs remain in `BABEL_DATA_DIR`. EPUB is handled directly; TXT/HTML are converted internally; MOBI/AZW/PDF/DOCX/CBZ and similar input formats require Calibre `ebook-convert`.
+
+`prepare_epub` accepts `output_format` so Claude can choose the final export format. EPUB output is native; MOBI/AZW3/PDF/DOCX/TXT/HTML/HTMLZ/KEPUB/RTF/FB2 output requires Calibre.

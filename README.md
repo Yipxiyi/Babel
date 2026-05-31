@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <strong>Unpack EPUB. Preserve XHTML. Translate in batches. Validate hard. Rebuild clean.</strong>
+  <strong>Normalize to EPUB. Preserve XHTML. Translate in batches. Export your format.</strong>
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
 
 ---
 
-Babel turns an ebook into structured translation batches, then rebuilds a valid EPUB after the translated XHTML snippets pass validation.
+Babel turns an ebook into structured translation batches, rebuilds a validated EPUB intermediate, then exports the final translated book in the format you choose.
 
 It is designed for workflows where a main agent maintains a global glossary and context ledger while Codex/subagents translate independent chapter batches in parallel. The core pipeline is model-agnostic; the Web/job layer can call user-configured providers such as OpenAI-compatible endpoints or Anthropic Claude.
 
@@ -31,18 +31,30 @@ Most quick ebook translation scripts flatten a book into text and destroy the re
 - Generates a glossary scaffold and worker instructions before translation begins.
 - Validates each translated batch before it can be applied.
 - Rejects common fake/placeholder translations such as `第 N 段译文`.
-- Repackages the EPUB with the required uncompressed `mimetype` entry.
+- Repackages a validated EPUB intermediate with the required uncompressed `mimetype` entry.
+- Exports the final translated book as EPUB or a Calibre-backed target format.
 - Audits the output for missing manifest items, broken internal links, and missing anchors.
 
 ## Supported Input Formats
 
-Babel outputs EPUB. Input support is split by fidelity:
+Babel normalizes every input into an EPUB workspace before translation. Input support is split by fidelity:
 
 - Native: `.epub`.
 - Built in: `.txt`, `.html`, `.htm`, `.xhtml`.
 - Calibre-backed: `.mobi`, `.azw`, `.azw3`, `.kfx`, `.pdf`, `.fb2`, `.docx`, `.rtf`, `.cbz`, `.cbr`, and related formats supported by `ebook-convert`.
 
 EPUB gives the best layout preservation because Babel can operate on the existing XHTML structure. Other formats are first converted to EPUB, then processed by the same validation pipeline.
+
+## Supported Output Formats
+
+- Native: `.epub`.
+- Calibre-backed: `.mobi`, `.azw3`, `.pdf`, `.docx`, `.txt`, `.html`, `.htmlz`, `.kepub`, `.rtf`, `.fb2`.
+
+EPUB output is dependency-free. Non-EPUB output is exported from the validated EPUB intermediate and requires Calibre `ebook-convert` unless you use the Docker image.
+
+`--output-epub` is still accepted as a compatibility alias, but new workflows should use `--output-book` plus `--output-format`.
+
+The `--output-book` path must include the selected extension, for example `output_zh-CN.pdf` with `--output-format pdf`.
 
 ## Status
 
@@ -62,9 +74,9 @@ Open:
 http://127.0.0.1:7860
 ```
 
-The Web UI lets you upload an ebook, review/edit the glossary, configure an API provider, watch progress, and download the translated EPUB plus report.
+The Web UI lets you upload an ebook, choose the final output format, review/edit the glossary, configure an API provider, watch progress, and download the translated book plus report.
 
-Docker includes Calibre for MOBI/AZW3/PDF/DOCX/CBZ conversion and stores private job data in the `babel-data` volume. Do not expose this server publicly without adding authentication.
+Docker includes Calibre for MOBI/AZW3/PDF/DOCX/CBZ input conversion and non-EPUB output export. Private job data is stored in the `babel-data` volume. Do not expose this server publicly without adding authentication.
 
 ## Install From Source
 
@@ -165,21 +177,33 @@ Validate all batches:
 babel-epub validate-batches --pipeline-dir ./babel_work/book/pipeline
 ```
 
-Apply translations and rebuild the EPUB:
+Apply translations and export EPUB:
 
 ```bash
 babel-epub apply \
   --work-dir ./babel_work/book \
-  --output-epub ./output_zh-CN.epub \
+  --output-book ./output_zh-CN.epub \
+  --output-format epub \
   --title "Translated Title" \
   --language zh-CN
 ```
 
-Audit the finished EPUB:
+Export another format, for example PDF:
+
+```bash
+babel-epub apply \
+  --work-dir ./babel_work/book \
+  --output-book ./output_zh-CN.pdf \
+  --output-format pdf \
+  --title "Translated Title" \
+  --language zh-CN
+```
+
+Audit the validated EPUB package. For non-EPUB final output, audit the intermediate EPUB in the work directory:
 
 ```bash
 babel-epub audit \
-  --epub ./output_zh-CN.epub \
+  --epub ./babel_work/book/output.epub \
   --out ./babel_work/book/pipeline/epub_audit.json
 ```
 
@@ -188,7 +212,7 @@ Write a report:
 ```bash
 babel-epub report \
   --work-dir ./babel_work/book \
-  --output-epub ./output_zh-CN.epub \
+  --output-book ./output_zh-CN.epub \
   --glossary ./translation_glossary.md \
   --report ./translation_report.md
 ```
@@ -203,7 +227,7 @@ babel-epub report \
 6. Require every worker to run `validate-batch`.
 7. Main agent runs `validate-batches`.
 8. Run `apply`, then `audit`.
-9. Scan the final EPUB for placeholder text and long untranslated passages.
+9. Scan the final book and intermediate EPUB for placeholder text and long untranslated passages.
 
 See [docs/CODEX_WORKFLOW.md](docs/CODEX_WORKFLOW.md) for the multi-agent operating model.
 
@@ -216,7 +240,7 @@ mkdir -p ~/.codex/skills/babel
 cp integrations/codex/babel/SKILL.md ~/.codex/skills/babel/SKILL.md
 ```
 
-Then ask Codex to use Babel for ebook translation. The skill points Codex at the local CLI/Web workflow and enforces glossary, context, validation, and EPUB-preservation rules.
+Then ask Codex to use Babel for ebook translation. The skill points Codex at the local CLI/Web workflow and enforces glossary, context, validation, selected output format, and EPUB-preservation rules.
 
 ## Claude Desktop MCP
 

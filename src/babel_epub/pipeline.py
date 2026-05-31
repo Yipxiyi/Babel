@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Iterable
 from xml.etree import ElementTree as ET
 
-from .formats import normalize_to_epub, write_input_format_metadata
+from .formats import convert_epub_to_output, normalize_to_epub, write_input_format_metadata, write_output_format_metadata
 
 
 XHTML_NS = "http://www.w3.org/1999/xhtml"
@@ -754,10 +754,23 @@ def command_apply(args: argparse.Namespace) -> None:
     source_dir = work_dir / "source"
     pipeline_dir = work_dir / "pipeline"
     translated_dir = work_dir / "translated_epub_tree"
+    intermediate_epub = work_dir / "output.epub"
+    output_value = getattr(args, "output_book", None) or getattr(args, "output_epub", None)
+    if not output_value:
+        raise ValueError("apply requires --output-book or --output-epub")
+    output_book = Path(output_value)
+    output_format = getattr(args, "output_format", None) or output_book.suffix or ".epub"
     apply_translations_to_tree(source_dir, translated_dir, pipeline_dir)
     update_metadata(translated_dir, args.title, args.language)
-    package_epub(translated_dir, Path(args.output_epub))
-    print(f"wrote {args.output_epub}")
+    package_epub(translated_dir, intermediate_epub)
+    metadata = convert_epub_to_output(
+        intermediate_epub,
+        output_book,
+        output_format=output_format,
+        converter_path=getattr(args, "converter_path", None),
+    )
+    write_output_format_metadata(pipeline_dir, metadata)
+    print(f"wrote {output_book}")
 
 
 def href_target(base_file: str, href: str) -> str:
@@ -908,7 +921,18 @@ def command_report(args: argparse.Namespace) -> None:
     chapters = json.loads((pipeline_dir / "chapters.json").read_text(encoding="utf-8"))
     manifest = json.loads((pipeline_dir / "batch_manifest.json").read_text(encoding="utf-8"))
     completed = [batch for batch in manifest if (pipeline_dir / batch["output"]).exists()]
-    output_epub = Path(args.output_epub)
+    output_value = getattr(args, "output_book", None) or getattr(args, "output_epub", None)
+    if not output_value:
+        raise ValueError("report requires --output-book or --output-epub")
+    output_book = Path(output_value)
+    output_epub = work_dir / "output.epub"
+    output_format_path = pipeline_dir / "output_format.json"
+    output_format = "unknown"
+    output_conversion = "unknown"
+    if output_format_path.exists():
+        output_metadata = json.loads(output_format_path.read_text(encoding="utf-8"))
+        output_format = output_metadata.get("output_format", "unknown")
+        output_conversion = output_metadata.get("output_conversion_method", "unknown")
     zip_ok = False
     image_count = 0
     xhtml_count = 0
@@ -922,7 +946,8 @@ def command_report(args: argparse.Namespace) -> None:
             xhtml_count = len([name for name in names if name.lower().endswith((".xhtml", ".html"))])
     report = f"""# Translation Report
 
-- Output file: `{output_epub.resolve()}`
+- Output file: `{output_book.resolve()}`
+- Output format: `{output_format}` via `{output_conversion}`
 - EPUB zip integrity: {'passed' if zip_ok else 'not verified or failed'}
 - Spine XHTML files: {len(chapters)}
 - XHTML/HTML files in output archive: {xhtml_count}
@@ -934,7 +959,7 @@ def command_report(args: argparse.Namespace) -> None:
 ## Validation Summary
 
 - Batch validation should pass before `apply`.
-- Run `babel-epub audit --epub {output_epub}` after packaging.
+- Run `babel-epub audit --epub {output_epub}` against the intermediate EPUB after packaging.
 - Record uncertain translations and glossary changes in the context ledger.
 """
     Path(args.report).write_text(report, encoding="utf-8")
@@ -970,9 +995,16 @@ def build_parser() -> argparse.ArgumentParser:
     validate_one.add_argument("--output", required=True)
     validate_one.set_defaults(func=command_validate_batch)
 
-    apply = subparsers.add_parser("apply", help="Apply translated batches and package the EPUB.")
+    apply = subparsers.add_parser("apply", help="Apply translated batches and export the selected output format.")
     apply.add_argument("--work-dir", default="babel_work")
-    apply.add_argument("--output-epub", required=True)
+    apply.add_argument("--output-book", help="Final output book path. Defaults to --output-epub for compatibility.")
+    apply.add_argument("--output-epub", help="Deprecated alias for --output-book.")
+    apply.add_argument(
+        "--output-format",
+        default="epub",
+        help="Output format: epub, mobi, azw3, pdf, docx, txt, html, htmlz, kepub, rtf, fb2.",
+    )
+    apply.add_argument("--converter-path", help="Optional path to Calibre ebook-convert for non-EPUB output.")
     apply.add_argument("--title")
     apply.add_argument("--language", default="zh-CN")
     apply.set_defaults(func=command_apply)
@@ -984,7 +1016,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     report = subparsers.add_parser("report", help="Write a compact translation report.")
     report.add_argument("--work-dir", default="babel_work")
-    report.add_argument("--output-epub", required=True)
+    report.add_argument("--output-book", help="Final output book path. Defaults to --output-epub for compatibility.")
+    report.add_argument("--output-epub", help="Deprecated alias for --output-book.")
     report.add_argument("--glossary", default="translation_glossary.md")
     report.add_argument("--report", default="translation_report.md")
     report.set_defaults(func=command_report)

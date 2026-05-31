@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 class BookFormatError(ValueError):
-    """Raised when Babel cannot normalize an input book into EPUB."""
+    """Raised when Babel cannot convert an input or output book format."""
 
 
 DIRECT_EPUB = {".epub"}
@@ -45,6 +45,19 @@ CALIBRE_CONVERSION = {
     ".snb",
     ".tcr",
 }
+NATIVE_OUTPUT = {".epub"}
+CALIBRE_OUTPUT = {
+    ".azw3",
+    ".docx",
+    ".fb2",
+    ".html",
+    ".htmlz",
+    ".kepub",
+    ".mobi",
+    ".pdf",
+    ".rtf",
+    ".txt",
+}
 
 
 @dataclass(frozen=True)
@@ -70,8 +83,8 @@ class InputFormat:
             create_html_epub(input_path, output_epub)
             return self.metadata(input_path, output_epub, "internal-html")
         if self.conversion == "calibre":
-            command = converter_path or shutil.which("ebook-convert")
-            if not command or not Path(command).exists():
+            command = resolve_ebook_convert(converter_path)
+            if not command:
                 raise BookFormatError(
                     f"{self.extension} input requires Calibre `ebook-convert`. "
                     "Install Calibre or convert the book to EPUB before using Babel."
@@ -92,6 +105,10 @@ class InputFormat:
 
 def supported_input_extensions() -> list[str]:
     return sorted(DIRECT_EPUB | INTERNAL_CONVERSION | CALIBRE_CONVERSION)
+
+
+def supported_output_extensions() -> list[str]:
+    return sorted(NATIVE_OUTPUT | CALIBRE_OUTPUT)
 
 
 def detect_input_format(path: Path) -> InputFormat:
@@ -121,6 +138,68 @@ def normalize_to_epub(input_path: Path, work_dir: Path, converter_path: str | No
     metadata = input_format.to_epub(original_path, epub_path, converter_path=converter_path)
     metadata["original_path"] = original_path.name
     return metadata
+
+
+def normalize_extension(value: str | None, fallback: str = ".epub") -> str:
+    extension = (value or fallback).strip().lower()
+    if not extension:
+        extension = fallback
+    if not extension.startswith("."):
+        extension = f".{extension}"
+    return extension
+
+
+def resolve_ebook_convert(converter_path: str | None = None) -> str | None:
+    if converter_path:
+        candidate = Path(converter_path)
+        if candidate.exists():
+            return str(candidate)
+        return shutil.which(converter_path)
+    return shutil.which("ebook-convert")
+
+
+def convert_epub_to_output(
+    source_epub: Path,
+    output_path: Path,
+    output_format: str | None = None,
+    converter_path: str | None = None,
+) -> dict:
+    if not source_epub.exists():
+        raise FileNotFoundError(source_epub)
+    extension = normalize_extension(output_format or output_path.suffix or ".epub")
+    if extension not in supported_output_extensions():
+        raise BookFormatError(
+            f"unsupported output format: {extension}. Supported: {', '.join(supported_output_extensions())}"
+        )
+    output_suffix = output_path.suffix.lower()
+    if not output_suffix:
+        raise BookFormatError(f"output path must include the selected output extension {extension}")
+    if output_suffix and output_suffix != extension:
+        raise BookFormatError(
+            f"output path suffix {output_suffix} does not match selected output format {extension}"
+        )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if extension in NATIVE_OUTPUT:
+        if source_epub.resolve() != output_path.resolve():
+            shutil.copy2(source_epub, output_path)
+        return output_metadata(output_path, extension, "copied")
+
+    command = resolve_ebook_convert(converter_path)
+    if not command:
+        raise BookFormatError(
+            f"{extension} output requires Calibre `ebook-convert`. "
+            "Install Calibre or choose EPUB output."
+        )
+    run_calibre_conversion(command, source_epub, output_path)
+    return output_metadata(output_path, extension, "calibre")
+
+
+def output_metadata(output_path: Path, extension: str, method: str) -> dict:
+    return {
+        "output_file": output_path.name,
+        "output_format": extension,
+        "output_conversion_method": method,
+    }
 
 
 def run_calibre_conversion(command: str, input_path: Path, output_epub: Path) -> None:
@@ -237,6 +316,13 @@ def create_minimal_epub(title: str, body_xhtml: str, output_epub: Path) -> None:
 
 def write_input_format_metadata(pipeline_dir: Path, metadata: dict) -> None:
     (pipeline_dir / "input_format.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_output_format_metadata(pipeline_dir: Path, metadata: dict) -> None:
+    (pipeline_dir / "output_format.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )

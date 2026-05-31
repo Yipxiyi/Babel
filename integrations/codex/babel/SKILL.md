@@ -11,7 +11,8 @@ Use this skill when the user asks to translate an EPUB or another ebook format, 
 
 - Babel installed from source or available on PATH.
 - Private ebook files must stay out of git.
-- EPUB is handled directly. TXT/HTML are converted internally. MOBI/AZW/PDF/DOCX/CBZ and similar formats require Calibre `ebook-convert`, included in Babel's Docker image.
+- EPUB is handled directly. TXT/HTML are converted internally. MOBI/AZW/PDF/DOCX/CBZ and similar input formats require Calibre `ebook-convert`, included in Babel's Docker image.
+- Final output format is user-selectable. EPUB output is native; MOBI/AZW3/PDF/DOCX/TXT/HTML/HTMLZ/KEPUB/RTF/FB2 output requires Calibre.
 - Use `translation_glossary.md` and `translation_context.md` as global coordination files.
 
 ## CLI Workflow
@@ -19,8 +20,8 @@ Use this skill when the user asks to translate an EPUB or another ebook format, 
 ```bash
 babel-epub prepare --input-book ./input.epub --work-dir ./babel_work/book --glossary ./translation_glossary.md --target-language "Simplified Chinese"
 babel-epub validate-batches --pipeline-dir ./babel_work/book/pipeline
-babel-epub apply --work-dir ./babel_work/book --output-epub ./output_zh-CN.epub --title "Translated Title" --language zh-CN
-babel-epub audit --epub ./output_zh-CN.epub --out ./babel_work/book/pipeline/epub_audit.json
+babel-epub apply --work-dir ./babel_work/book --output-book ./output_zh-CN.epub --output-format epub --title "Translated Title" --language zh-CN
+babel-epub audit --epub ./babel_work/book/output.epub --out ./babel_work/book/pipeline/epub_audit.json
 ```
 
 ## Web Workflow
@@ -29,7 +30,7 @@ babel-epub audit --epub ./output_zh-CN.epub --out ./babel_work/book/pipeline/epu
 babel-server --host 127.0.0.1 --port 7860 --data-dir ./babel-data
 ```
 
-Open `http://127.0.0.1:7860`, upload the EPUB, review the glossary, configure the provider, start translation, then download the output EPUB and report.
+Open `http://127.0.0.1:7860`, upload the ebook, choose the output format, review the glossary, configure the provider, start translation, then download the output book and report.
 
 ## Agent Rules
 

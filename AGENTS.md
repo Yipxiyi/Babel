@@ -12,7 +12,7 @@
 ## Working Rules
 
 - Keep Babel dependency-free unless a feature cannot be implemented safely with the standard library.
-- Do not commit EPUB books, translated EPUBs, generated JSONL batches, local workspaces, or user reading material.
+- Do not commit ebook files, translated outputs, generated JSONL batches, local workspaces, or user reading material.
 - Preserve EPUB structure first: spine, manifest, CSS, images, IDs, anchors, links, and XHTML root tags are not optional.
 - Prefer explicit validation gates over best-effort repair.
 - Keep the CLI model-agnostic. Agent/Codex orchestration belongs in docs and worker instructions, not hardcoded API calls.

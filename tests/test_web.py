@@ -16,7 +16,11 @@ class WebTests(unittest.TestCase):
         self.assertIn("API Provider", html)
         self.assertIn("Glossary", html)
         self.assertIn("Job Progress", html)
-        self.assertIn("Download EPUB", html)
+        self.assertIn("Output Format", html)
+        self.assertIn("Download Book", html)
+        self.assertIn("AZW3", html)
+        self.assertIn("HTMLZ", html)
+        self.assertIn("KEPUB", html)
         self.assertIn("/api/jobs", html)
         self.assertIn("OpenAI Compatible", html)
 

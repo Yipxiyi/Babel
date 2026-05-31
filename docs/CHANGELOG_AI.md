@@ -8,4 +8,5 @@
 - Added README, MIT license, contribution guide, brand/design docs, architecture docs, and a minimal SVG icon.
 - Added minimal EPUB round-trip tests and placeholder-rejection coverage.
 - Added a self-hosted Web/Docker/agent MVP while preserving the CLI core.
-- Added multi-format input normalization while keeping EPUB as the intermediate/output format.
+- Added multi-format input normalization while keeping EPUB as the translation intermediate.
+- Added user-selectable final output formats while keeping EPUB as the internal audit target.

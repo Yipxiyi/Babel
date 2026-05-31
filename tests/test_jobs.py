@@ -25,6 +25,7 @@ class JobEngineTests(unittest.TestCase):
                     target_language="Simplified Chinese",
                     title="示例书",
                     language="zh-CN",
+                    output_format="epub",
                 )
             )
             self.assertEqual(job.status, "prepared")
@@ -40,6 +41,8 @@ class JobEngineTests(unittest.TestCase):
             self.assertEqual(finished.completed_batches, 1)
             self.assertEqual(finished.total_batches, 1)
             self.assertTrue(finished.output_epub and finished.output_epub.exists())
+            self.assertTrue(finished.output_book and finished.output_book.exists())
+            self.assertEqual(finished.output_book.suffix, ".epub")
             self.assertTrue(finished.audit_path and finished.audit_path.exists())
             self.assertTrue(finished.report_path and finished.report_path.exists())
             with zipfile.ZipFile(finished.output_epub) as archive:

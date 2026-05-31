@@ -7,8 +7,10 @@ from pathlib import Path
 
 from babel_epub.formats import (
     BookFormatError,
+    convert_epub_to_output,
     detect_input_format,
     supported_input_extensions,
+    supported_output_extensions,
 )
 from babel_epub.pipeline import command_prepare, read_jsonl
 
@@ -32,6 +34,24 @@ class FormatTests(unittest.TestCase):
             ".rtf",
             ".cbz",
             ".cbr",
+        }:
+            self.assertIn(extension, extensions)
+
+    def test_supported_output_formats_include_mainstream_export_extensions(self) -> None:
+        extensions = supported_output_extensions()
+
+        for extension in {
+            ".epub",
+            ".mobi",
+            ".azw3",
+            ".pdf",
+            ".docx",
+            ".txt",
+            ".html",
+            ".htmlz",
+            ".kepub",
+            ".rtf",
+            ".fb2",
         }:
             self.assertIn(extension, extensions)
 
@@ -96,6 +116,51 @@ class FormatTests(unittest.TestCase):
                     tmp_path / "out.epub",
                     converter_path="/definitely/missing/ebook-convert",
                 )
+
+    def test_non_epub_output_reports_clear_error_when_converter_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_epub = tmp_path / "source.epub"
+            source_epub.write_bytes(b"epub bytes")
+
+            with self.assertRaisesRegex(BookFormatError, "ebook-convert"):
+                convert_epub_to_output(
+                    source_epub,
+                    tmp_path / "output.pdf",
+                    output_format=".pdf",
+                    converter_path="/definitely/missing/ebook-convert",
+                )
+
+    def test_epub_output_copies_without_external_converter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_epub = tmp_path / "source.epub"
+            source_epub.write_bytes(b"epub bytes")
+            output_epub = tmp_path / "custom.epub"
+
+            metadata = convert_epub_to_output(source_epub, output_epub, output_format=".epub")
+
+            self.assertEqual(output_epub.read_bytes(), b"epub bytes")
+            self.assertEqual(metadata["output_format"], ".epub")
+            self.assertEqual(metadata["output_conversion_method"], "copied")
+
+    def test_output_format_must_match_explicit_output_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_epub = tmp_path / "source.epub"
+            source_epub.write_bytes(b"epub bytes")
+
+            with self.assertRaisesRegex(BookFormatError, "does not match"):
+                convert_epub_to_output(source_epub, tmp_path / "output.epub", output_format="pdf")
+
+    def test_output_path_must_include_selected_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_epub = tmp_path / "source.epub"
+            source_epub.write_bytes(b"epub bytes")
+
+            with self.assertRaisesRegex(BookFormatError, "must include"):
+                convert_epub_to_output(source_epub, tmp_path / "output", output_format="epub")
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 ## Pull Request Checklist
 
-- Keep generated EPUBs, JSONL batches, and private book content out of commits.
+- Keep generated ebook outputs, JSONL batches, and private book content out of commits.
 - Add tests for CLI behavior, validation rules, or EPUB packaging changes.
 - Update `README.md` when user-facing commands change.
 - Update `docs/ARCHITECTURE.md` when pipeline boundaries change.

@@ -14,7 +14,7 @@ flowchart LR
   C --> F["Docker"]
   B --> G["Codex skill"]
   C --> H["Claude MCP"]
-  C --> I["output.epub + report"]
+  C --> I["output book + EPUB intermediate + report"]
 ```
 
 ## Pipeline
@@ -27,12 +27,15 @@ flowchart LR
 6. Blocks are grouped into chapter/file-aware JSONL batches.
 7. Translators write matching rows with `translated_html`.
 8. Validators compare source and translated snippets.
-9. `apply` copies the source tree, replaces validated nodes, updates optional metadata, and packages the EPUB.
-10. `audit` unpacks the output and checks structural integrity.
+9. `apply` copies the source tree, replaces validated nodes, updates optional metadata, and packages `work_dir/output.epub`.
+10. `apply` exports the selected final output format from that EPUB intermediate.
+11. `audit` unpacks the EPUB intermediate or EPUB final output and checks structural integrity.
 
 ## Format Layer
 
-`babel_epub.formats` is responsible for input detection and normalization. EPUB remains the fidelity baseline. Non-EPUB formats are converted into an EPUB intermediate before translation; Babel outputs EPUB.
+`babel_epub.formats` is responsible for input detection, input normalization, and final output export. EPUB remains the fidelity baseline. Non-EPUB inputs are converted into an EPUB intermediate before translation; non-EPUB outputs are exported from the validated EPUB intermediate after translation.
+
+Native output is `.epub`. Calibre-backed output includes `.mobi`, `.azw3`, `.pdf`, `.docx`, `.txt`, `.html`, `.htmlz`, `.kepub`, `.rtf`, and `.fb2`.
 
 ## Validation Boundaries
 
@@ -50,7 +53,7 @@ A plugin would couple Babel to one agent host. A skill alone would only document
 
 ## Job Engine
 
-`babel_epub.jobs` owns local job state under `BABEL_DATA_DIR`. It prepares workspaces, reads and writes the glossary, calls provider adapters batch by batch, validates outputs, applies translations, audits the final EPUB, and writes a report.
+`babel_epub.jobs` owns local job state under `BABEL_DATA_DIR`. It prepares workspaces, reads and writes the glossary, calls provider adapters batch by batch, validates outputs, applies translations, exports the selected output format, audits the EPUB intermediate, and writes a report.
 
 MVP is single-user and local-first. API keys are accepted at start time and are not written to durable job state.
 

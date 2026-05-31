@@ -42,7 +42,7 @@ INDEX_HTML = r"""<!doctype html>
 </head>
 <body>
   <header>
-    <div class="brand"><div class="mark"></div><div><h1>Babel</h1><div class="tagline">Normalize to EPUB. Translate in batches. Rebuild clean.</div></div></div>
+    <div class="brand"><div class="mark"></div><div><h1>Babel</h1><div class="tagline">Normalize to EPUB. Translate in batches. Export your format.</div></div></div>
     <div class="hint">Self-hosted ebook translation workspace</div>
   </header>
   <main>
@@ -55,6 +55,7 @@ INDEX_HTML = r"""<!doctype html>
           <div class="field"><label>Output Title</label><input name="title" placeholder="Translated title"></div>
           <div class="field"><label>Language Code</label><input name="language" value="zh-CN"></div>
         </div>
+        <div class="field"><label>Output Format</label><select name="output_format" id="outputFormat"><option value="epub">EPUB</option><option value="mobi">MOBI</option><option value="azw3">AZW3</option><option value="pdf">PDF</option><option value="docx">DOCX</option><option value="txt">TXT</option><option value="html">HTML</option><option value="htmlz">HTMLZ</option><option value="kepub">KEPUB</option><option value="rtf">RTF</option><option value="fb2">FB2</option></select></div>
         <button type="submit">Prepare Workspace</button>
       </form>
       <hr>
@@ -76,7 +77,7 @@ INDEX_HTML = r"""<!doctype html>
     </section>
     <section>
       <h2>Downloads</h2>
-      <a class="download" id="downloadEpub" href="#" hidden>Download EPUB</a>
+      <a class="download" id="downloadEpub" href="#" hidden>Download Book</a>
       <a class="download" id="downloadGlossary" href="#" hidden>Download Glossary</a>
       <a class="download" id="downloadReport" href="#" hidden>Download Report</a>
       <a class="download" id="downloadAudit" href="#" hidden>Download Audit JSON</a>
@@ -87,7 +88,7 @@ INDEX_HTML = r"""<!doctype html>
 <script>
 let currentJob = null; let pollTimer = null;
 const statusEl = document.getElementById('status'); const glossaryEl = document.getElementById('glossary');
-function showStatus(job){ const pct = job.total_batches ? Math.round(job.completed_batches / job.total_batches * 100) : 0; document.getElementById('bar').style.width = pct + '%'; statusEl.textContent = JSON.stringify({id:job.job_id,status:job.status,message:job.message,batches:`${job.completed_batches}/${job.total_batches}`,errors:job.errors}, null, 2); const done = job.status === 'completed'; const id=job.job_id; for (const [el,path] of [['downloadEpub','output'],['downloadGlossary','glossary'],['downloadReport','report'],['downloadAudit','audit']]){ const a=document.getElementById(el); a.hidden = !done && path !== 'glossary'; a.href = `/api/jobs/${id}/download/${path}`; } }
+function showStatus(job){ const pct = job.total_batches ? Math.round(job.completed_batches / job.total_batches * 100) : 0; document.getElementById('bar').style.width = pct + '%'; statusEl.textContent = JSON.stringify({id:job.job_id,status:job.status,message:job.message,input_format:job.input_format,output_format:job.output_format,batches:`${job.completed_batches}/${job.total_batches}`,errors:job.errors}, null, 2); const done = job.status === 'completed'; const id=job.job_id; for (const [el,path] of [['downloadEpub','output'],['downloadGlossary','glossary'],['downloadReport','report'],['downloadAudit','audit']]){ const a=document.getElementById(el); a.hidden = !done && path !== 'glossary'; a.href = `/api/jobs/${id}/download/${path}`; } }
 async function refresh(){ if(!currentJob) return; const res = await fetch(`/api/jobs/${currentJob}`); const data = await res.json(); showStatus(data.job); if(data.glossary && document.activeElement !== glossaryEl) glossaryEl.value = data.glossary; if(['completed','failed'].includes(data.job.status) && pollTimer){ clearInterval(pollTimer); pollTimer = null; } }
 document.getElementById('uploadForm').addEventListener('submit', async (e)=>{ e.preventDefault(); const form=new FormData(e.target); const res=await fetch('/api/jobs',{method:'POST',body:form}); const data=await res.json(); currentJob=data.job.job_id; document.getElementById('startBtn').disabled=false; document.getElementById('saveGlossary').disabled=false; showStatus(data.job); glossaryEl.value=data.glossary; });
 document.getElementById('saveGlossary').addEventListener('click', async ()=>{ await fetch(`/api/jobs/${currentJob}/glossary`,{method:'POST',body:glossaryEl.value}); await refresh(); });
@@ -162,15 +163,20 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, "missing epub upload")
             return
         filename = Path(file_item.filename or "input.epub").name
-        job = self.engine.create_job(
-            JobRequest(
-                filename=filename,
-                content=file_item.content,
-                target_language=_field_value(form, "target_language", "Simplified Chinese"),
-                title=_field_value(form, "title", ""),
-                language=_field_value(form, "language", "zh-CN"),
+        try:
+            job = self.engine.create_job(
+                JobRequest(
+                    filename=filename,
+                    content=file_item.content,
+                    target_language=_field_value(form, "target_language", "Simplified Chinese"),
+                    title=_field_value(form, "title", ""),
+                    language=_field_value(form, "language", "zh-CN"),
+                    output_format=_field_value(form, "output_format", "epub"),
+                )
             )
-        )
+        except ValueError as exc:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
         self._send_json({"job": job.to_dict(include_paths=False), "glossary": self.engine.read_glossary(job.job_id)})
 
     def _send_job(self, job_id: str) -> None:
@@ -220,7 +226,7 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "job not found")
             return
         path_map = {
-            "output": job.output_epub,
+            "output": job.output_book or job.output_epub,
             "glossary": job.glossary_path,
             "report": job.report_path,
             "audit": job.audit_path,
@@ -229,7 +235,7 @@ class BabelWebHandler(BaseHTTPRequestHandler):
         if artifact_path is None or not artifact_path.exists():
             self.send_error(HTTPStatus.NOT_FOUND, "artifact not ready")
             return
-        content_type = "application/epub+zip" if artifact == "output" else "text/plain; charset=utf-8"
+        content_type = _content_type_for_download(artifact_path) if artifact == "output" else "text/plain; charset=utf-8"
         if artifact == "audit":
             content_type = "application/json; charset=utf-8"
         self.send_response(HTTPStatus.OK)
@@ -291,6 +297,18 @@ def _field_value(form: dict[str, FormPart], name: str, default: str) -> str:
     if part is None:
         return default
     return part.value if part.value else default
+
+
+def _content_type_for_download(path: Path) -> str:
+    return {
+        ".epub": "application/epub+zip",
+        ".kepub": "application/epub+zip",
+        ".pdf": "application/pdf",
+        ".txt": "text/plain; charset=utf-8",
+        ".html": "text/html; charset=utf-8",
+        ".htmlz": "application/zip",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }.get(path.suffix.lower(), "application/octet-stream")
 
 
 def run_server(host: str = "127.0.0.1", port: int = 7860, data_dir: Path | None = None) -> None:

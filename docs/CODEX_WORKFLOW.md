@@ -13,7 +13,7 @@ Use Babel as a CLI plus Codex orchestration. Do not make the core project a Code
 - Give each worker the glossary, worker instructions, target batch, and relevant context.
 - Require every worker to run `validate-batch`.
 - Merge only validated outputs.
-- Run `validate-batches`, `apply`, `audit`, and final scans.
+- Run `validate-batches`, `apply`, `audit`, output export checks, and final scans.
 
 ## Worker Contract
 
@@ -56,9 +56,9 @@ Before declaring success:
 
 ```bash
 babel-epub validate-batches --pipeline-dir ./babel_work/book/pipeline
-babel-epub apply --work-dir ./babel_work/book --output-epub ./output_zh-CN.epub --title "Translated Title" --language zh-CN
-babel-epub audit --epub ./output_zh-CN.epub --out ./babel_work/book/pipeline/epub_audit.json
-unzip -t ./output_zh-CN.epub
+babel-epub apply --work-dir ./babel_work/book --output-book ./output_zh-CN.epub --output-format epub --title "Translated Title" --language zh-CN
+babel-epub audit --epub ./babel_work/book/output.epub --out ./babel_work/book/pipeline/epub_audit.json
+unzip -t ./babel_work/book/output.epub
 ```
 
-Then scan the output for placeholder text and unexpectedly long untranslated passages.
+Then scan the final book and EPUB intermediate for placeholder text and unexpectedly long untranslated passages. For non-EPUB final output, Calibre `ebook-convert` must be available during `apply`.
