@@ -14,6 +14,7 @@ EPUB translation is easy to do badly: many scripts flatten books into plain text
 ## Goals
 
 - Preserve EPUB structure and formatting as much as possible.
+- Accept mainstream ebook formats by normalizing them into an EPUB workspace before translation.
 - Extract human-readable XHTML content into stable JSONL batches.
 - Support global glossary and context continuity across batches.
 - Validate translated snippets before applying them.
@@ -33,6 +34,7 @@ EPUB translation is easy to do badly: many scripts flatten books into plain text
 ## Functional Requirements
 
 - `prepare` unpacks an EPUB, locates OPF/spine content, extracts translatable XHTML blocks, writes batches, creates name candidates, and creates worker instructions.
+- `prepare` accepts EPUB directly, converts TXT/HTML internally, and uses Calibre `ebook-convert` for mainstream non-EPUB formats when available.
 - `validate-batch` verifies row IDs, root tags, structural attributes, links, anchors, and placeholder patterns.
 - `validate-batches` blocks apply when any translated batch is missing or invalid.
 - `apply` replaces only validated XHTML snippets and packages an EPUB with `mimetype` first and uncompressed.

@@ -5,18 +5,19 @@ description: Use Babel to translate EPUB books while preserving layout, using th
 
 # Babel Codex Skill
 
-Use this skill when the user asks to translate an EPUB, batch EPUB translation, preserve EPUB formatting, or run Babel.
+Use this skill when the user asks to translate an EPUB or another ebook format, batch ebook translation, preserve ebook formatting, or run Babel.
 
 ## Requirements
 
 - Babel installed from source or available on PATH.
-- Private EPUB files must stay out of git.
+- Private ebook files must stay out of git.
+- EPUB is handled directly. TXT/HTML are converted internally. MOBI/AZW/PDF/DOCX/CBZ and similar formats require Calibre `ebook-convert`, included in Babel's Docker image.
 - Use `translation_glossary.md` and `translation_context.md` as global coordination files.
 
 ## CLI Workflow
 
 ```bash
-babel-epub prepare --input-epub ./input.epub --work-dir ./babel_work/book --glossary ./translation_glossary.md --target-language "Simplified Chinese"
+babel-epub prepare --input-book ./input.epub --work-dir ./babel_work/book --glossary ./translation_glossary.md --target-language "Simplified Chinese"
 babel-epub validate-batches --pipeline-dir ./babel_work/book/pipeline
 babel-epub apply --work-dir ./babel_work/book --output-epub ./output_zh-CN.epub --title "Translated Title" --language zh-CN
 babel-epub audit --epub ./output_zh-CN.epub --out ./babel_work/book/pipeline/epub_audit.json

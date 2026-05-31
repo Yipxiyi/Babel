@@ -1,4 +1,4 @@
-"""Layout-preserving EPUB translation pipeline.
+"""Layout-preserving EPUB-normalized translation pipeline.
 
 Babel deliberately keeps the core pipeline dependency-free. It prepares JSONL
 batches for human or agent translators, validates translated XHTML snippets,
@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 from xml.etree import ElementTree as ET
+
+from .formats import normalize_to_epub, write_input_format_metadata
 
 
 XHTML_NS = "http://www.w3.org/1999/xhtml"
@@ -481,12 +483,15 @@ babel-epub validate-batch --pipeline-dir PATH/TO/pipeline --batch batches/BATCH.
 
 
 def command_prepare(args: argparse.Namespace) -> None:
-    input_epub = Path(args.input_epub)
+    input_value = getattr(args, "input_book", None) or getattr(args, "input_epub", None)
+    if not input_value:
+        raise ValueError("prepare requires --input-book or --input-epub")
+    input_book = Path(input_value)
     work_dir = Path(args.work_dir)
     src_dir = work_dir / "source"
     pipeline_dir = work_dir / "pipeline"
-    if not input_epub.exists():
-        raise FileNotFoundError(input_epub)
+    if not input_book.exists():
+        raise FileNotFoundError(input_book)
     if src_dir.exists() and not args.force:
         raise FileExistsError(f"{src_dir} already exists; rerun with --force to replace it")
     if args.force and src_dir.exists():
@@ -496,7 +501,13 @@ def command_prepare(args: argparse.Namespace) -> None:
 
     src_dir.mkdir(parents=True, exist_ok=True)
     pipeline_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(input_epub) as archive:
+    input_metadata = normalize_to_epub(
+        input_book,
+        work_dir,
+        converter_path=getattr(args, "converter_path", None),
+    )
+    write_input_format_metadata(pipeline_dir, input_metadata)
+    with zipfile.ZipFile(work_dir / "input.epub") as archive:
         archive.extractall(src_dir)
 
     blocks = extract_blocks(src_dir, pipeline_dir)
@@ -935,14 +946,16 @@ def command_worker_instructions(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Babel layout-preserving EPUB translation pipeline")
+    parser = argparse.ArgumentParser(description="Babel layout-preserving ebook translation pipeline")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    prepare = subparsers.add_parser("prepare", help="Unpack an EPUB and create translation batches.")
-    prepare.add_argument("--input-epub", required=True)
+    prepare = subparsers.add_parser("prepare", help="Normalize a book to EPUB and create translation batches.")
+    prepare.add_argument("--input-book", help="Input ebook file. Supports EPUB directly plus TXT/HTML internally and Calibre-backed formats.")
+    prepare.add_argument("--input-epub", help="Deprecated alias for --input-book.")
     prepare.add_argument("--work-dir", default="babel_work")
     prepare.add_argument("--glossary", default="translation_glossary.md")
     prepare.add_argument("--target-language", default="Simplified Chinese")
+    prepare.add_argument("--converter-path", help="Optional path to Calibre ebook-convert for MOBI/AZW/PDF/etc.")
     prepare.add_argument("--max-blocks", type=int, default=120)
     prepare.add_argument("--force", action="store_true")
     prepare.set_defaults(func=command_prepare)

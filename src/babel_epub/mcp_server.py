@@ -27,7 +27,7 @@ def tool(name: str, description: str, properties: dict[str, Any], required: list
 TOOLS = [
     tool(
         "prepare_epub",
-        "Prepare an EPUB workspace from a local file path.",
+        "Prepare an ebook workspace from a local file path. Inputs are normalized to EPUB internally.",
         {
             "path": {"type": "string"},
             "target_language": {"type": "string", "default": "Simplified Chinese"},
@@ -73,7 +73,7 @@ class BabelMCP:
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "babel-mcp", "version": "0.2.0"},
+                    "serverInfo": {"name": "babel-mcp", "version": "0.3.0"},
                 },
             }
         if method == "notifications/initialized":

@@ -13,6 +13,17 @@ dist/
 
 # Local EPUB workspaces and private reading material.
 *.epub
+*.mobi
+*.azw
+*.azw3
+*.azw4
+*.kfx
+*.pdf
+*.fb2
+*.docx
+*.rtf
+*.cbz
+*.cbr
 *.jsonl
 *.validation.json
 babel_work/

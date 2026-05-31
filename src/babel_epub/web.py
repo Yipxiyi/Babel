@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from .formats import supported_input_extensions
 from .jobs import BabelJobEngine, JobRequest
 from .providers import ProviderSettings
 
@@ -20,7 +21,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Babel · EPUB Translation</title>
+  <title>Babel · Ebook Translation</title>
   <style>
     :root{--paper:#f6f1e7;--ink:#17130f;--clay:#c86f37;--muted:#776b5e;--line:#dacfbf;--panel:#fffaf0}
     *{box-sizing:border-box} body{margin:0;background:radial-gradient(circle at top left,#fffaf0,var(--paper));color:var(--ink);font:15px/1.45 Georgia,"Times New Roman",serif}
@@ -41,14 +42,14 @@ INDEX_HTML = r"""<!doctype html>
 </head>
 <body>
   <header>
-    <div class="brand"><div class="mark"></div><div><h1>Babel</h1><div class="tagline">Preserve XHTML. Translate in batches. Rebuild clean.</div></div></div>
-    <div class="hint">Self-hosted EPUB translation workspace</div>
+    <div class="brand"><div class="mark"></div><div><h1>Babel</h1><div class="tagline">Normalize to EPUB. Translate in batches. Rebuild clean.</div></div></div>
+    <div class="hint">Self-hosted ebook translation workspace</div>
   </header>
   <main>
     <section>
-      <h2>Upload EPUB</h2>
+      <h2>Upload Book</h2>
       <form id="uploadForm">
-        <div class="field"><label>EPUB file</label><input required name="epub" type="file" accept=".epub,application/epub+zip"></div>
+        <div class="field"><label>Book file</label><input required name="epub" type="file" accept="__ACCEPT_EXTENSIONS__"></div>
         <div class="field"><label>Target Language</label><input name="target_language" value="Simplified Chinese"></div>
         <div class="row">
           <div class="field"><label>Output Title</label><input name="title" placeholder="Translated title"></div>
@@ -63,7 +64,7 @@ INDEX_HTML = r"""<!doctype html>
       <div class="field"><label>API Key</label><input id="apiKey" type="password" autocomplete="off"></div>
       <div class="field"><label>Model</label><input id="model" value="gpt-4.1"></div>
       <button id="startBtn" disabled>Start Translation</button>
-      <p class="hint">Keys are sent only to this local server process. Do not expose this app publicly without adding auth.</p>
+      <p class="hint">Keys are sent only to this local server process. Do not expose this app publicly without adding auth. MOBI/AZW/PDF/DOCX and similar formats require Calibre ebook-convert in the container or host.</p>
     </section>
     <section>
       <h2>Glossary</h2>
@@ -97,7 +98,8 @@ document.getElementById('startBtn').addEventListener('click', async ()=>{ const 
 
 
 def render_index_html() -> str:
-    return INDEX_HTML
+    accept = ",".join(supported_input_extensions())
+    return INDEX_HTML.replace("__ACCEPT_EXTENSIONS__", accept)
 
 
 @dataclass(frozen=True)

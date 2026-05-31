@@ -39,6 +39,7 @@ class BabelJob:
     job_id: str
     status: str
     filename: str
+    input_format: str
     target_language: str
     title: str
     language: str
@@ -99,6 +100,7 @@ class BabelJobEngine:
             job_id=data["job_id"],
             status=data["status"],
             filename=data["filename"],
+            input_format=data.get("input_format", ".epub"),
             target_language=data["target_language"],
             title=data.get("title", ""),
             language=data.get("language", "zh-CN"),
@@ -131,14 +133,16 @@ class BabelJobEngine:
     def create_job(self, request: JobRequest) -> BabelJob:
         job_id = uuid.uuid4().hex[:12]
         work_dir = self.data_dir / job_id
-        input_epub = work_dir / "input.epub"
+        extension = Path(request.filename).suffix.lower() or ".book"
+        input_book = work_dir / f"upload{extension}"
         glossary_path = work_dir / "translation_glossary.md"
         work_dir.mkdir(parents=True, exist_ok=True)
-        input_epub.write_bytes(request.content)
+        input_book.write_bytes(request.content)
 
         command_prepare(
             Namespace(
-                input_epub=input_epub,
+                input_book=input_book,
+                input_epub=None,
                 work_dir=work_dir,
                 glossary=glossary_path,
                 target_language=request.target_language,
@@ -147,16 +151,18 @@ class BabelJobEngine:
             )
         )
         manifest = json.loads((work_dir / "pipeline" / "batch_manifest.json").read_text(encoding="utf-8"))
+        input_metadata = json.loads((work_dir / "pipeline" / "input_format.json").read_text(encoding="utf-8"))
         blocks = read_jsonl(work_dir / "pipeline" / "blocks.jsonl")
         job = BabelJob(
             job_id=job_id,
             status="prepared",
             filename=request.filename,
+            input_format=input_metadata.get("input_format", extension),
             target_language=request.target_language,
             title=request.title,
             language=request.language,
             work_dir=work_dir,
-            input_epub=input_epub,
+            input_epub=work_dir / "input.epub",
             glossary_path=glossary_path,
             total_batches=len(manifest),
             block_count=len(blocks),

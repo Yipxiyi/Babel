@@ -18,13 +18,13 @@
 
 ---
 
-Babel 会把 EPUB 转成结构化翻译批次，在译文 XHTML 片段通过校验后，再重建为有效 EPUB。
+Babel 会把电子书转成结构化翻译批次，在译文 XHTML 片段通过校验后，再重建为有效 EPUB。
 
 它适合这样的工作流：主 agent 维护全局 glossary 和上下文账本，Codex/subagent 并发处理章节批次。核心管线不绑定具体模型；Web/job 层可以调用用户自配置的 OpenAI-compatible endpoint 或 Anthropic Claude。
 
 ## 为什么需要 Babel
 
-很多 EPUB 翻译脚本会把书拍平成纯文本，直接毁掉 CSS、章节、链接、锚点、图片、目录和强调格式。Babel 直接处理 EPUB 内部结构：
+很多电子书翻译脚本会把书拍平成纯文本，直接毁掉 CSS、章节、链接、锚点、图片、目录和强调格式。Babel 会先把输入规范化为 EPUB，再直接处理 EPUB 内部结构：
 
 - 保留章节文件、spine 顺序、CSS、图片、链接、锚点、ID 和行内强调。
 - 只抽取 XHTML 中人类可读的文本块，生成 JSONL 批次。
@@ -33,6 +33,16 @@ Babel 会把 EPUB 转成结构化翻译批次，在译文 XHTML 片段通过校�
 - 拒绝 `第 N 段译文` 这类假翻译/占位文本。
 - 按 EPUB 要求将 `mimetype` 作为第一个文件且不压缩。
 - 审计输出 EPUB 的 manifest、内部链接和锚点。
+
+## 支持的输入格式
+
+Babel 统一输出 EPUB。输入格式按保真度分层：
+
+- 原生支持：`.epub`。
+- 内置转换：`.txt`、`.html`、`.htm`、`.xhtml`。
+- 基于 Calibre 转换：`.mobi`、`.azw`、`.azw3`、`.kfx`、`.pdf`、`.fb2`、`.docx`、`.rtf`、`.cbz`、`.cbr`，以及 `ebook-convert` 支持的相关格式。
+
+EPUB 的保真度最高，因为 Babel 能直接处理原有 XHTML 结构。其他格式会先转换为 EPUB，再进入同一套校验和回写管线。
 
 ## 当前状态
 
@@ -52,9 +62,9 @@ docker compose up --build
 http://127.0.0.1:7860
 ```
 
-Web UI 支持上传 EPUB、查看/编辑 glossary、配置 API provider、查看进度，并下载翻译后的 EPUB 和报告。
+Web UI 支持上传电子书、查看/编辑 glossary、配置 API provider、查看进度，并下载翻译后的 EPUB 和报告。
 
-Docker 会把私有任务数据保存在 `babel-data` volume 中。不要在没有认证保护的情况下把这个服务暴露到公网。
+Docker 镜像内置 Calibre，可处理 MOBI/AZW3/PDF/DOCX/CBZ 等转换型格式，并把私有任务数据保存在 `babel-data` volume 中。不要在没有认证保护的情况下把这个服务暴露到公网。
 
 ## 从源码安装
 
@@ -90,11 +100,11 @@ MVP 支持的 provider：
 
 ## CLI 快速开始
 
-从 EPUB 准备私有工作目录：
+从电子书准备私有工作目录：
 
 ```bash
 babel-epub prepare \
-  --input-epub ./input.epub \
+  --input-book ./input.epub \
   --work-dir ./babel_work/book \
   --glossary ./translation_glossary.md \
   --target-language "Simplified Chinese" \
@@ -117,6 +127,14 @@ babel_work/book/
     WORKER_INSTRUCTIONS.md
 translation_glossary.md
 ```
+
+非 EPUB 输入示例：
+
+```bash
+babel-epub prepare --input-book ./input.azw3 --work-dir ./babel_work/book
+```
+
+TXT/HTML 不需要外部工具。MOBI/AZW/PDF/DOCX/CBZ 等格式需要 Calibre `ebook-convert`；使用 Docker 镜像时已内置。
 
 每个批次的译文需要写成匹配的 JSONL 行，放入 `pipeline/translated/`。
 
@@ -198,7 +216,7 @@ mkdir -p ~/.codex/skills/babel
 cp integrations/codex/babel/SKILL.md ~/.codex/skills/babel/SKILL.md
 ```
 
-之后可以让 Codex 使用 Babel 翻译 EPUB。这个 skill 会引导 Codex 使用本地 CLI/Web 工作流，并强制 glossary、上下文、校验和 EPUB 结构保留规则。
+之后可以让 Codex 使用 Babel 翻译电子书。这个 skill 会引导 Codex 使用本地 CLI/Web 工作流，并强制 glossary、上下文、校验和 EPUB 结构保留规则。
 
 ## Claude Desktop MCP
 
@@ -238,9 +256,9 @@ docs/assets/brand/           # 图标和品牌资产
 
 ## 法律和安全说明
 
-Babel 是格式保留工具，不提供版权授权。请只翻译你拥有、已获授权，或法律允许转换的 EPUB/文档。不要把私有 EPUB、译后 EPUB 或生成工作区提交到公开仓库。
+Babel 是格式保留工具，不提供版权授权。请只翻译你拥有、已获授权，或法律允许转换的电子书/文档。不要把私有书籍、译后 EPUB 或生成工作区提交到公开仓库。
 
-默认 `.gitignore` 已排除 `*.epub`、JSONL 批次、生成报告和本地工作目录。
+默认 `.gitignore` 已排除 `*.epub`、JSONL 批次、生成报告和本地工作目录。如果使用其他私有电子书格式，也应避免提交到 git。
 
 ## 开发
 

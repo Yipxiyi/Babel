@@ -20,7 +20,7 @@ Babel is a careful tool for format-preserving translation workflows. It should f
 Use:
 
 - "Preserve XHTML. Translate in batches. Rebuild clean."
-- "Agentic EPUB translation pipeline."
+- "Agentic ebook translation pipeline."
 - "Validation gates before packaging."
 
 Avoid:

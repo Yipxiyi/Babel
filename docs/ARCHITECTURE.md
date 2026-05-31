@@ -6,7 +6,8 @@ Babel is a dependency-free Python package with multiple adapters. The core value
 
 ```mermaid
 flowchart LR
-  A["input.epub"] --> B["babel_epub.pipeline"]
+  A["input book"] --> Z["babel_epub.formats"]
+  Z --> B["babel_epub.pipeline"]
   B --> C["babel_epub.jobs"]
   D["provider adapters"] --> C
   C --> E["Web UI"]
@@ -18,14 +19,20 @@ flowchart LR
 
 ## Pipeline
 
-1. `prepare` extracts the EPUB into `work_dir/source`.
-2. `prepare` reads `META-INF/container.xml`, finds the OPF package, reads the manifest and spine, and walks XHTML body elements.
-3. Translatable elements are serialized as XHTML snippets and written to `blocks.jsonl`.
-4. Blocks are grouped into chapter/file-aware JSONL batches.
-5. Translators write matching rows with `translated_html`.
-6. Validators compare source and translated snippets.
-7. `apply` copies the source tree, replaces validated nodes, updates optional metadata, and packages the EPUB.
-8. `audit` unpacks the output and checks structural integrity.
+1. `prepare` normalizes the input book to `work_dir/input.epub`.
+2. EPUB input is copied directly; TXT/HTML use Babel's internal converter; MOBI/AZW/PDF/DOCX/CBZ and similar formats use Calibre `ebook-convert`.
+3. `prepare` extracts the normalized EPUB into `work_dir/source`.
+4. `prepare` reads `META-INF/container.xml`, finds the OPF package, reads the manifest and spine, and walks XHTML body elements.
+5. Translatable elements are serialized as XHTML snippets and written to `blocks.jsonl`.
+6. Blocks are grouped into chapter/file-aware JSONL batches.
+7. Translators write matching rows with `translated_html`.
+8. Validators compare source and translated snippets.
+9. `apply` copies the source tree, replaces validated nodes, updates optional metadata, and packages the EPUB.
+10. `audit` unpacks the output and checks structural integrity.
+
+## Format Layer
+
+`babel_epub.formats` is responsible for input detection and normalization. EPUB remains the fidelity baseline. Non-EPUB formats are converted into an EPUB intermediate before translation; Babel outputs EPUB.
 
 ## Validation Boundaries
 
@@ -49,4 +56,4 @@ MVP is single-user and local-first. API keys are accepted at start time and are 
 
 ## Data Policy
 
-Generated workspaces contain book content and must stay local. The repository `.gitignore` excludes EPUB files, JSONL batches, output reports, and work directories.
+Generated workspaces contain book content and must stay local. The repository `.gitignore` excludes common private ebook files, JSONL batches, output reports, and work directories.

@@ -8,6 +8,17 @@ __pycache__
 babel-data
 babel_work
 *.epub
+*.mobi
+*.azw
+*.azw3
+*.azw4
+*.kfx
+*.pdf
+*.fb2
+*.docx
+*.rtf
+*.cbz
+*.cbr
 *.jsonl
 *.validation.json
 translation_glossary.md

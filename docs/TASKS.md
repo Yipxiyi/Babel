@@ -9,6 +9,7 @@
 
 ## Done
 
+- Multi-format ebook input normalization.
 - Initial CLI pipeline.
 - OpenArc governance setup.
 - MIT license and public README.

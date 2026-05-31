@@ -1,6 +1,6 @@
 # Claude Desktop Integration
 
-Babel ships a small stdio MCP server so Claude can prepare EPUB jobs, update the glossary, start translation, and check job status through local tools.
+Babel ships a small stdio MCP server so Claude can prepare ebook translation jobs, update the glossary, start translation, and check job status through local tools.
 
 ## Install
 
@@ -36,4 +36,4 @@ See `claude_desktop_config.example.json`.
 - `job_status`
 - `update_glossary`
 
-The MCP server is local-first. EPUB content and translated outputs remain in `BABEL_DATA_DIR`.
+The MCP server is local-first. Book content and translated outputs remain in `BABEL_DATA_DIR`. EPUB is handled directly; TXT/HTML are converted internally; MOBI/AZW/PDF/DOCX/CBZ and similar formats require Calibre `ebook-convert`.

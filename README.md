@@ -5,7 +5,7 @@
 <h1 align="center">Babel</h1>
 
 <p align="center">
-  Layout-preserving EPUB translation pipeline for agentic, chapter-by-chapter workflows.
+  Layout-preserving ebook translation pipeline for agentic, chapter-by-chapter workflows.
 </p>
 
 <p align="center">
@@ -18,13 +18,13 @@
 
 ---
 
-Babel turns an EPUB into structured translation batches, then rebuilds a valid EPUB after the translated XHTML snippets pass validation.
+Babel turns an ebook into structured translation batches, then rebuilds a valid EPUB after the translated XHTML snippets pass validation.
 
 It is designed for workflows where a main agent maintains a global glossary and context ledger while Codex/subagents translate independent chapter batches in parallel. The core pipeline is model-agnostic; the Web/job layer can call user-configured providers such as OpenAI-compatible endpoints or Anthropic Claude.
 
 ## Why Babel
 
-Most quick EPUB translation scripts flatten a book into text and destroy the reading experience. Babel works directly on the EPUB internals:
+Most quick ebook translation scripts flatten a book into text and destroy the reading experience. Babel normalizes inputs to EPUB, then works directly on EPUB internals:
 
 - Preserves chapter files, spine order, CSS, images, links, anchors, IDs, and inline emphasis.
 - Extracts only human-readable XHTML blocks into JSONL batches.
@@ -33,6 +33,16 @@ Most quick EPUB translation scripts flatten a book into text and destroy the rea
 - Rejects common fake/placeholder translations such as `第 N 段译文`.
 - Repackages the EPUB with the required uncompressed `mimetype` entry.
 - Audits the output for missing manifest items, broken internal links, and missing anchors.
+
+## Supported Input Formats
+
+Babel outputs EPUB. Input support is split by fidelity:
+
+- Native: `.epub`.
+- Built in: `.txt`, `.html`, `.htm`, `.xhtml`.
+- Calibre-backed: `.mobi`, `.azw`, `.azw3`, `.kfx`, `.pdf`, `.fb2`, `.docx`, `.rtf`, `.cbz`, `.cbr`, and related formats supported by `ebook-convert`.
+
+EPUB gives the best layout preservation because Babel can operate on the existing XHTML structure. Other formats are first converted to EPUB, then processed by the same validation pipeline.
 
 ## Status
 
@@ -52,9 +62,9 @@ Open:
 http://127.0.0.1:7860
 ```
 
-The Web UI lets you upload an EPUB, review/edit the glossary, configure an API provider, watch progress, and download the translated EPUB plus report.
+The Web UI lets you upload an ebook, review/edit the glossary, configure an API provider, watch progress, and download the translated EPUB plus report.
 
-Docker stores private job data in the `babel-data` volume. Do not expose this server publicly without adding authentication.
+Docker includes Calibre for MOBI/AZW3/PDF/DOCX/CBZ conversion and stores private job data in the `babel-data` volume. Do not expose this server publicly without adding authentication.
 
 ## Install From Source
 
@@ -94,7 +104,7 @@ Prepare a private working directory from your EPUB:
 
 ```bash
 babel-epub prepare \
-  --input-epub ./input.epub \
+  --input-book ./input.epub \
   --work-dir ./babel_work/book \
   --glossary ./translation_glossary.md \
   --target-language "Simplified Chinese" \
@@ -117,6 +127,14 @@ babel_work/book/
     WORKER_INSTRUCTIONS.md
 translation_glossary.md
 ```
+
+For non-EPUB input:
+
+```bash
+babel-epub prepare --input-book ./input.azw3 --work-dir ./babel_work/book
+```
+
+TXT/HTML work without external tools. MOBI/AZW/PDF/DOCX/CBZ and similar formats require Calibre `ebook-convert` unless you use the Docker image.
 
 Translate each batch by writing matching JSONL rows into `pipeline/translated/`.
 
@@ -198,7 +216,7 @@ mkdir -p ~/.codex/skills/babel
 cp integrations/codex/babel/SKILL.md ~/.codex/skills/babel/SKILL.md
 ```
 
-Then ask Codex to use Babel for EPUB translation. The skill points Codex at the local CLI/Web workflow and enforces glossary, context, validation, and EPUB-preservation rules.
+Then ask Codex to use Babel for ebook translation. The skill points Codex at the local CLI/Web workflow and enforces glossary, context, validation, and EPUB-preservation rules.
 
 ## Claude Desktop MCP
 
@@ -238,9 +256,9 @@ docs/assets/brand/           # icon and identity assets
 
 ## Legal And Safety Notes
 
-Babel is a format-preserving tool. It does not grant translation rights. Only translate books or documents you own, have permission to process, or are legally allowed to transform. Do not commit private EPUBs, translated books, or generated workspaces to a public repository.
+Babel is a format-preserving tool. It does not grant translation rights. Only translate books or documents you own, have permission to process, or are legally allowed to transform. Do not commit private books, translated books, or generated workspaces to a public repository.
 
-The default `.gitignore` excludes `*.epub`, JSONL batches, generated reports, and local work directories.
+The default `.gitignore` excludes `*.epub`, JSONL batches, generated reports, and local work directories. If you use other private book formats, keep them out of git as well.
 
 ## Development
 

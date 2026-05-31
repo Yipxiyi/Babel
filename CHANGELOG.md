@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 - 2026-06-01
+
+### Added
+
+- Multi-format ebook input normalization.
+- Native internal conversion for `.txt`, `.html`, `.htm`, and `.xhtml`.
+- Calibre-backed conversion for mainstream ebook/document formats including `.mobi`, `.azw`, `.azw3`, `.kfx`, `.pdf`, `.fb2`, `.docx`, `.rtf`, `.cbz`, and `.cbr`.
+- Input format metadata at `pipeline/input_format.json`.
+- Web upload accept list for supported ebook formats.
+- Docker image installs Calibre so conversion-backed formats work in the self-hosted container.
+
 ## 0.2.0 - 2026-05-31
 
 ### Added

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "babel-epub"
-version = "0.2.0"
-description = "Layout-preserving EPUB translation pipeline for agentic chapter-by-chapter workflows."
+version = "0.3.0"
+description = "Layout-preserving ebook translation pipeline for agentic chapter-by-chapter workflows."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }

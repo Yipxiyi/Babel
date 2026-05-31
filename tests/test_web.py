@@ -9,7 +9,10 @@ class WebTests(unittest.TestCase):
     def test_web_shell_exposes_upload_provider_progress_and_downloads(self) -> None:
         html = render_index_html()
 
-        self.assertIn("Upload EPUB", html)
+        self.assertIn("Upload Book", html)
+        self.assertIn(".azw3", html)
+        self.assertIn(".mobi", html)
+        self.assertIn(".pdf", html)
         self.assertIn("API Provider", html)
         self.assertIn("Glossary", html)
         self.assertIn("Job Progress", html)
