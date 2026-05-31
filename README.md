@@ -37,7 +37,7 @@ Babel is early-stage but usable. The core CLI is dependency-free Python and is c
 ## Install From Source
 
 ```bash
-git clone https://github.com/janzo/Babel.git
+git clone https://github.com/Yipxiyi/Babel.git
 cd Babel
 python3 -m venv .venv
 source .venv/bin/activate
