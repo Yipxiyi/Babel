@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0 - 2026-05-31
+
+### Added
+
+- Self-hosted Web UI via `babel-server`.
+- Local job engine for upload, glossary review, batch translation, validation, apply, audit, reports, and downloads.
+- OpenAI-compatible, Anthropic, and fake dry-run provider adapters.
+- Dockerfile and Docker Compose deployment.
+- Claude MCP server via `babel-mcp`.
+- Codex skill integration under `integrations/codex/babel`.
+- Web/job/provider tests.
+
 ## 0.1.0 - 2026-05-31
 
 ### Added

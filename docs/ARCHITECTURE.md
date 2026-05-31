@@ -2,20 +2,18 @@
 
 ## Shape
 
-Babel is a dependency-free Python CLI. It is intentionally not a Codex plugin. The core value is file transformation and validation; agent orchestration is a workflow layered on top.
+Babel is a dependency-free Python package with multiple adapters. The core value is file transformation and validation; Web, Docker, Codex, and Claude are integration layers over the same pipeline.
 
 ```mermaid
 flowchart LR
-  A["input.epub"] --> B["prepare"]
-  B --> C["source EPUB tree"]
-  B --> D["JSONL batches"]
-  B --> E["glossary + context ledger"]
-  D --> F["Codex or human batch translation"]
-  E --> F
-  F --> G["validate-batch / validate-batches"]
-  G --> H["apply"]
-  H --> I["output EPUB"]
-  I --> J["audit + report"]
+  A["input.epub"] --> B["babel_epub.pipeline"]
+  B --> C["babel_epub.jobs"]
+  D["provider adapters"] --> C
+  C --> E["Web UI"]
+  C --> F["Docker"]
+  B --> G["Codex skill"]
+  C --> H["Claude MCP"]
+  C --> I["output.epub + report"]
 ```
 
 ## Pipeline
@@ -35,11 +33,19 @@ Babel validates structure, not literary quality. It can detect malformed snippet
 
 ## Why CLI First
 
-A plugin would couple Babel to one agent host. A skill alone would only document a process. A CLI gives stable behavior that any agent, human, script, or CI job can call. The recommended model is:
+A plugin would couple Babel to one agent host. A skill alone would only document a process. The stable source of truth is the Python package and CLI, with a Web app and agent integrations layered on top.
 
-- Core: `babel-epub` CLI.
-- Optional: Codex skill or prompt pack that teaches agents how to orchestrate the CLI.
-- Optional later: provider adapters outside the core package.
+- Core: `babel_epub.pipeline`.
+- CLI: `babel-epub`.
+- Web self-hosting: `babel-server`.
+- Claude Desktop: `babel-mcp`.
+- Codex: `integrations/codex/babel/SKILL.md`.
+
+## Job Engine
+
+`babel_epub.jobs` owns local job state under `BABEL_DATA_DIR`. It prepares workspaces, reads and writes the glossary, calls provider adapters batch by batch, validates outputs, applies translations, audits the final EPUB, and writes a report.
+
+MVP is single-user and local-first. API keys are accepted at start time and are not written to durable job state.
 
 ## Data Policy
 

@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+babel-data
+babel_work
+*.epub
+*.jsonl
+*.validation.json
+translation_glossary.md
+translation_report.md

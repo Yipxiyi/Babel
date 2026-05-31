@@ -1,0 +1,15 @@
+services:
+  babel:
+    build: .
+    image: babel-epub:latest
+    ports:
+      - "7860:7860"
+    environment:
+      BABEL_HOST: 0.0.0.0
+      BABEL_PORT: 7860
+      BABEL_DATA_DIR: /data
+    volumes:
+      - babel-data:/data
+
+volumes:
+  babel-data:

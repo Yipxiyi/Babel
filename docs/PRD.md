@@ -19,6 +19,8 @@ EPUB translation is easy to do badly: many scripts flatten books into plain text
 - Validate translated snippets before applying them.
 - Rebuild a standards-compatible EPUB.
 - Keep the core dependency-free and model-agnostic.
+- Provide a self-hosted Web UI and Docker deployment for users who do not want to operate the CLI directly.
+- Support Codex and Claude integrations without duplicating the EPUB pipeline.
 
 ## Non-goals
 
@@ -36,6 +38,9 @@ EPUB translation is easy to do badly: many scripts flatten books into plain text
 - `apply` replaces only validated XHTML snippets and packages an EPUB with `mimetype` first and uncompressed.
 - `audit` checks manifest presence, spine XHTML count, internal links, anchors, images, and ZIP integrity.
 - `report` writes a compact translation report.
+- `babel-server` exposes upload, glossary review, provider configuration, progress, and download flows.
+- `babel-mcp` exposes local Claude tools for preparing, starting, and inspecting jobs.
+- Docker deployment runs the Web UI with persistent `/data` storage.
 
 ## AI And Agent Requirements
 
@@ -60,5 +65,5 @@ EPUB translation is easy to do badly: many scripts flatten books into plain text
 ## Open Questions
 
 - Whether to add optional EPUB 3 navigation document translation support beyond body extraction.
-- Whether to provide optional provider adapters in a separate package.
-- Whether to ship a Codex skill template as an optional companion artifact.
+- Whether to provide provider adapters in a separate package once the adapter surface grows.
+- Whether to add authentication for public-facing deployments. The MVP assumes private self-hosted use.

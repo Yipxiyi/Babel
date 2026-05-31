@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "babel-epub"
-version = "0.1.0"
+version = "0.2.0"
 description = "Layout-preserving EPUB translation pipeline for agentic chapter-by-chapter workflows."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,6 +25,8 @@ dependencies = []
 
 [project.scripts]
 babel-epub = "babel_epub.cli:main"
+babel-server = "babel_epub.web:main"
+babel-mcp = "babel_epub.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -32,4 +34,3 @@ where = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-

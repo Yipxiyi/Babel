@@ -16,7 +16,7 @@
 
 Babel turns an EPUB into structured translation batches, then rebuilds a valid EPUB after the translated XHTML snippets pass validation.
 
-It is designed for workflows where a main agent maintains a global glossary and context ledger while Codex/subagents translate independent chapter batches in parallel. Babel does not call a translation API and does not require a third-party orchestration framework. It gives you the file structure, validation gates, and EPUB packaging layer.
+It is designed for workflows where a main agent maintains a global glossary and context ledger while Codex/subagents translate independent chapter batches in parallel. The core pipeline is model-agnostic; the Web/job layer can call user-configured providers such as OpenAI-compatible endpoints or Anthropic Claude.
 
 ## Why Babel
 
@@ -32,7 +32,25 @@ Most quick EPUB translation scripts flatten a book into text and destroy the rea
 
 ## Status
 
-Babel is early-stage but usable. The core CLI is dependency-free Python and is covered by a minimal EPUB round-trip test.
+Babel is early-stage but usable. It now includes a dependency-free CLI core, a self-hosted Web UI, Docker deployment, a Codex skill, and a Claude MCP server.
+
+## Easiest Start: Docker Web UI
+
+```bash
+git clone https://github.com/Yipxiyi/Babel.git
+cd Babel
+docker compose up --build
+```
+
+Open:
+
+```txt
+http://127.0.0.1:7860
+```
+
+The Web UI lets you upload an EPUB, review/edit the glossary, configure an API provider, watch progress, and download the translated EPUB plus report.
+
+Docker stores private job data in the `babel-data` volume. Do not expose this server publicly without adding authentication.
 
 ## Install From Source
 
@@ -48,10 +66,25 @@ Verify the CLI:
 
 ```bash
 babel-epub --help
+babel-server --help
 python3 -m unittest discover -s tests -v
 ```
 
-## Quick Start
+## Web UI From Source
+
+```bash
+babel-server --host 127.0.0.1 --port 7860 --data-dir ./babel-data
+```
+
+Open `http://127.0.0.1:7860`.
+
+Supported MVP providers:
+
+- `OpenAI Compatible`: any `/v1/chat/completions`-compatible endpoint.
+- `Anthropic Claude`: Anthropic Messages API.
+- `Fake Dry Run`: deterministic local output for testing the pipeline without spending tokens.
+
+## CLI Quick Start
 
 Prepare a private working directory from your EPUB:
 
@@ -152,19 +185,51 @@ babel-epub report \
 
 See [docs/CODEX_WORKFLOW.md](docs/CODEX_WORKFLOW.md) for the multi-agent operating model.
 
+## Codex Skill
+
+Install by copying the skill folder:
+
+```bash
+mkdir -p ~/.codex/skills/babel
+cp integrations/codex/babel/SKILL.md ~/.codex/skills/babel/SKILL.md
+```
+
+Then ask Codex to use Babel for EPUB translation. The skill points Codex at the local CLI/Web workflow and enforces glossary, context, validation, and EPUB-preservation rules.
+
+## Claude Desktop MCP
+
+Install Babel, then add this MCP server to Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "babel": {
+      "command": "babel-mcp",
+      "env": {
+        "BABEL_DATA_DIR": "/absolute/path/to/babel-data"
+      }
+    }
+  }
+}
+```
+
+See [integrations/claude](integrations/claude).
+
 ## Plugin Or Skill?
 
-Babel is intentionally a standalone CLI project, not a Codex plugin.
+Babel is intentionally a standalone package with CLI/Web/MCP adapters, not a Codex plugin.
 
-A plugin would be the wrong abstraction for the core problem: EPUB extraction, validation, and packaging should be reusable from any terminal, CI job, or agent environment. A Codex skill can document how to orchestrate Babel, and Babel may later ship an optional skill template, but the source of truth should remain this CLI.
+A plugin would be the wrong abstraction for the core problem: EPUB extraction, validation, and packaging should be reusable from any terminal, Web server, Docker container, CI job, or agent environment. Codex and Claude integrations call the same core instead of duplicating it.
 
 ## Repository Layout
 
 ```txt
-src/babel_epub/          # dependency-free CLI and EPUB pipeline
-tests/                   # minimal EPUB round-trip tests
-docs/                   # OpenArc product, design, brand, architecture docs
-docs/assets/brand/       # icon and identity assets
+src/babel_epub/              # dependency-free core, job engine, Web server, MCP server
+integrations/codex/babel/    # Codex skill
+integrations/claude/         # Claude Desktop MCP docs/config
+tests/                       # minimal EPUB/job/Web tests
+docs/                        # OpenArc product, design, brand, architecture docs
+docs/assets/brand/           # icon and identity assets
 ```
 
 ## Legal And Safety Notes
@@ -181,6 +246,7 @@ source .venv/bin/activate
 python3 -m pip install -e .
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 -m py_compile src/babel_epub/*.py
+docker compose config  # optional, requires Docker
 ```
 
 ## License

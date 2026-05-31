@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "babel": {
+      "command": "babel-mcp",
+      "env": {
+        "BABEL_DATA_DIR": "/absolute/path/to/babel-data"
+      }
+    }
+  }
+}

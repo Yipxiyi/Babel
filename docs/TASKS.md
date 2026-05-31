@@ -4,7 +4,8 @@
 
 - Harden EPUB 2 and EPUB 3 navigation support.
 - Add more fixture coverage for links, images, footnotes, and nested inline tags.
-- Consider an optional Codex skill template outside the core CLI.
+- Add optional job retry controls in the Web UI.
+- Add optional provider presets for common OpenAI-compatible endpoints.
 
 ## Done
 
@@ -12,3 +13,7 @@
 - OpenArc governance setup.
 - MIT license and public README.
 - Minimal SVG project icon.
+- Self-hosted Web MVP.
+- Docker deployment.
+- Codex skill integration.
+- Claude MCP server.

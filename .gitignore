@@ -6,6 +6,7 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.env
 build/
 dist/
 *.egg-info/
@@ -15,6 +16,7 @@ dist/
 *.jsonl
 *.validation.json
 babel_work/
+babel-data/
 .babel/
 input.epub
 output*.epub
