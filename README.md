@@ -12,6 +12,10 @@
   <strong>Unpack EPUB. Preserve XHTML. Translate in batches. Validate hard. Rebuild clean.</strong>
 </p>
 
+<p align="center">
+  English | <a href="README.zh-CN.md">简体中文</a>
+</p>
+
 ---
 
 Babel turns an EPUB into structured translation batches, then rebuilds a valid EPUB after the translated XHTML snippets pass validation.
