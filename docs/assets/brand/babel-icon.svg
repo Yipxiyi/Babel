@@ -1,0 +1,13 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Babel project icon</title>
+  <desc id="desc">A minimal geometric tower made of stacked translation blocks.</desc>
+  <rect width="512" height="512" rx="112" fill="#F6F1E7"/>
+  <path d="M112 380H400" stroke="#17130F" stroke-width="24" stroke-linecap="round"/>
+  <path d="M142 322H370" stroke="#17130F" stroke-width="24" stroke-linecap="round"/>
+  <path d="M174 264H338" stroke="#17130F" stroke-width="24" stroke-linecap="round"/>
+  <path d="M205 206H307" stroke="#17130F" stroke-width="24" stroke-linecap="round"/>
+  <path d="M236 148H276" stroke="#17130F" stroke-width="24" stroke-linecap="round"/>
+  <path d="M154 380C154 238 205 157 256 116C307 157 358 238 358 380" stroke="#C86F37" stroke-width="18" stroke-linecap="round"/>
+  <circle cx="256" cy="116" r="18" fill="#C86F37"/>
+  <path d="M190 334L226 298L262 334L322 274" stroke="#17130F" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

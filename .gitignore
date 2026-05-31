@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.Python
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Local EPUB workspaces and private reading material.
+*.epub
+*.jsonl
+*.validation.json
+babel_work/
+.babel/
+input.epub
+output*.epub
+translation_glossary.md
+translation_report.md
+
+# OS/editor noise.
+.DS_Store
+.idea/
+.vscode/
