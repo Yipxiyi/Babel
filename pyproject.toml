@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "babel-epub"
-version = "0.4.0"
+version = "0.6.0"
 description = "Layout-preserving ebook translation pipeline for agentic chapter-by-chapter workflows."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,6 +30,9 @@ babel-mcp = "babel_epub.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+babel_epub = ["static/*", "static/**/*"]
 
 [tool.ruff]
 line-length = 100

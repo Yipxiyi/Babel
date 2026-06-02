@@ -1,8 +1,9 @@
-"""Dependency-free self-hosted Web UI for Babel."""
+"""Self-hosted Web UI and API server for Babel."""
 
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import re
 from dataclasses import dataclass
@@ -11,96 +12,43 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from .formats import supported_input_extensions
 from .jobs import BabelJobEngine, JobRequest
-from .providers import ProviderSettings
+from .providers import (
+    DEFAULT_MAX_CONCURRENCY,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_REQUEST_TIMEOUT,
+    ProviderSettings,
+    normalize_max_concurrency,
+    normalize_max_retries,
+    normalize_request_timeout,
+)
 
 
-INDEX_HTML = r"""<!doctype html>
+STATIC_DIR = Path(__file__).with_name("static")
+FALLBACK_INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Babel · Ebook Translation</title>
-  <style>
-    :root{--paper:#f6f1e7;--ink:#17130f;--clay:#c86f37;--muted:#776b5e;--line:#dacfbf;--panel:#fffaf0}
-    *{box-sizing:border-box} body{margin:0;background:radial-gradient(circle at top left,#fffaf0,var(--paper));color:var(--ink);font:15px/1.45 Georgia,"Times New Roman",serif}
-    header{display:flex;align-items:center;justify-content:space-between;padding:28px 34px;border-bottom:1px solid var(--line)}
-    .brand{display:flex;gap:14px;align-items:center}.mark{width:46px;height:46px;border-radius:14px;background:var(--ink);position:relative}.mark:before,.mark:after{content:"";position:absolute;left:10px;right:10px;border-top:5px solid var(--paper);border-radius:10px}.mark:before{top:15px}.mark:after{top:27px}
-    h1{font-size:31px;line-height:1;margin:0;letter-spacing:-.04em}.tagline{color:var(--muted);font-size:14px;margin-top:4px}
-    main{display:grid;grid-template-columns:340px minmax(360px,1fr) 320px;gap:18px;padding:22px}
-    section{background:rgba(255,250,240,.82);border:1px solid var(--line);border-radius:24px;padding:20px;box-shadow:0 18px 50px rgba(23,19,15,.08)}
-    h2{font-size:18px;margin:0 0 14px;letter-spacing:-.02em}.field{margin:13px 0}label{display:block;font:12px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:7px}
-    input,select,textarea,button{width:100%;border:1px solid var(--line);border-radius:14px;padding:11px 12px;background:#fffdf7;color:var(--ink);font:14px/1.35 ui-sans-serif,system-ui,sans-serif}
-    textarea{min-height:290px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
-    button{cursor:pointer;background:var(--ink);color:var(--paper);border-color:var(--ink);font-weight:700}button.secondary{background:#fffdf7;color:var(--ink);border-color:var(--line)}button:disabled{opacity:.5;cursor:not-allowed}
-    .status{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#17130f;color:#f6f1e7;border-radius:18px;padding:16px;min-height:160px;white-space:pre-wrap;overflow:auto}.progress{height:12px;background:#eadfce;border-radius:99px;overflow:hidden}.bar{height:100%;width:0;background:var(--clay);transition:width .25s ease}
-    a.download{display:block;margin:10px 0;padding:12px;border:1px solid var(--line);border-radius:14px;color:var(--ink);text-decoration:none;background:#fffdf7;font-family:ui-sans-serif,system-ui,sans-serif}
-    .hint{color:var(--muted);font-size:13px}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-    @media (max-width: 1040px){main{grid-template-columns:1fr}header{align-items:flex-start;gap:12px;flex-direction:column}}
-  </style>
+  <title>Babel · Ebook Translation Workbench</title>
 </head>
 <body>
-  <header>
-    <div class="brand"><div class="mark"></div><div><h1>Babel</h1><div class="tagline">Normalize to EPUB. Translate in batches. Export your format.</div></div></div>
-    <div class="hint">Self-hosted ebook translation workspace</div>
-  </header>
-  <main>
-    <section>
-      <h2>Upload Book</h2>
-      <form id="uploadForm">
-        <div class="field"><label>Book file</label><input required name="epub" type="file" accept="__ACCEPT_EXTENSIONS__"></div>
-        <div class="field"><label>Target Language</label><input name="target_language" value="Simplified Chinese"></div>
-        <div class="row">
-          <div class="field"><label>Output Title</label><input name="title" placeholder="Translated title"></div>
-          <div class="field"><label>Language Code</label><input name="language" value="zh-CN"></div>
-        </div>
-        <div class="field"><label>Output Format</label><select name="output_format" id="outputFormat"><option value="epub">EPUB</option><option value="mobi">MOBI</option><option value="azw3">AZW3</option><option value="pdf">PDF</option><option value="docx">DOCX</option><option value="txt">TXT</option><option value="html">HTML</option><option value="htmlz">HTMLZ</option><option value="kepub">KEPUB</option><option value="rtf">RTF</option><option value="fb2">FB2</option></select></div>
-        <button type="submit">Prepare Workspace</button>
-      </form>
-      <hr>
-      <h2>API Provider</h2>
-      <div class="field"><label>Provider</label><select id="provider"><option value="openai-compatible">OpenAI Compatible</option><option value="anthropic">Anthropic Claude</option><option value="fake">Fake Dry Run</option></select></div>
-      <div class="field"><label>Base URL</label><input id="baseUrl" value="https://api.openai.com/v1"></div>
-      <div class="field"><label>API Key</label><input id="apiKey" type="password" autocomplete="off"></div>
-      <div class="field"><label>Model</label><input id="model" value="gpt-4.1"></div>
-      <button id="startBtn" disabled>Start Translation</button>
-      <p class="hint">Keys are sent only to this local server process. Do not expose this app publicly without adding auth. MOBI/AZW/PDF/DOCX and similar formats require Calibre ebook-convert in the container or host.</p>
-    </section>
-    <section>
-      <h2>Glossary</h2>
-      <textarea id="glossary" placeholder="Prepare a job to review glossary candidates."></textarea>
-      <button class="secondary" id="saveGlossary" disabled>Save Glossary</button>
-      <h2 style="margin-top:20px">Job Progress</h2>
-      <div class="progress"><div class="bar" id="bar"></div></div>
-      <pre class="status" id="status">No job prepared.</pre>
-    </section>
-    <section>
-      <h2>Downloads</h2>
-      <a class="download" id="downloadEpub" href="#" hidden>Download Book</a>
-      <a class="download" id="downloadGlossary" href="#" hidden>Download Glossary</a>
-      <a class="download" id="downloadReport" href="#" hidden>Download Report</a>
-      <a class="download" id="downloadAudit" href="#" hidden>Download Audit JSON</a>
-      <h2 style="margin-top:20px">Validation</h2>
-      <p class="hint">Babel validates batch row IDs, root tags, structural attributes, links, anchors, placeholder text, ZIP integrity, and EPUB internal references before exposing downloads.</p>
-    </section>
-  </main>
-<script>
-let currentJob = null; let pollTimer = null;
-const statusEl = document.getElementById('status'); const glossaryEl = document.getElementById('glossary');
-function showStatus(job){ const pct = job.total_batches ? Math.round(job.completed_batches / job.total_batches * 100) : 0; document.getElementById('bar').style.width = pct + '%'; statusEl.textContent = JSON.stringify({id:job.job_id,status:job.status,message:job.message,input_format:job.input_format,output_format:job.output_format,batches:`${job.completed_batches}/${job.total_batches}`,errors:job.errors}, null, 2); const done = job.status === 'completed'; const id=job.job_id; for (const [el,path] of [['downloadEpub','output'],['downloadGlossary','glossary'],['downloadReport','report'],['downloadAudit','audit']]){ const a=document.getElementById(el); a.hidden = !done && path !== 'glossary'; a.href = `/api/jobs/${id}/download/${path}`; } }
-async function refresh(){ if(!currentJob) return; const res = await fetch(`/api/jobs/${currentJob}`); const data = await res.json(); showStatus(data.job); if(data.glossary && document.activeElement !== glossaryEl) glossaryEl.value = data.glossary; if(['completed','failed'].includes(data.job.status) && pollTimer){ clearInterval(pollTimer); pollTimer = null; } }
-document.getElementById('uploadForm').addEventListener('submit', async (e)=>{ e.preventDefault(); const form=new FormData(e.target); const res=await fetch('/api/jobs',{method:'POST',body:form}); const data=await res.json(); currentJob=data.job.job_id; document.getElementById('startBtn').disabled=false; document.getElementById('saveGlossary').disabled=false; showStatus(data.job); glossaryEl.value=data.glossary; });
-document.getElementById('saveGlossary').addEventListener('click', async ()=>{ await fetch(`/api/jobs/${currentJob}/glossary`,{method:'POST',body:glossaryEl.value}); await refresh(); });
-document.getElementById('startBtn').addEventListener('click', async ()=>{ const payload={provider:provider.value,base_url:baseUrl.value,api_key:apiKey.value,model:model.value,target_language:document.querySelector('[name=target_language]').value}; const res=await fetch(`/api/jobs/${currentJob}/start`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); const data=await res.json(); showStatus(data.job); pollTimer=setInterval(refresh,1500); });
-</script>
+  <div id="root">
+    <h1>Babel</h1>
+    <p>Static Web UI has not been built yet. Run npm run build --prefix web.</p>
+    <p>Guide · Start with upload · View current job · Resume Translation</p>
+    <div id="terminalLog" data-api-loader="loadLatestJob">/api/jobs</div>
+  </div>
 </body>
-</html>"""
+</html>
+"""
 
 
 def render_index_html() -> str:
-    accept = ",".join(supported_input_extensions())
-    return INDEX_HTML.replace("__ACCEPT_EXTENSIONS__", accept)
+    index_path = STATIC_DIR / "index.html"
+    if index_path.exists():
+        return index_path.read_text(encoding="utf-8")
+    return FALLBACK_INDEX_HTML
 
 
 @dataclass(frozen=True)
@@ -116,9 +64,6 @@ class BabelWebHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
-        if path == "/":
-            self._send_bytes(render_index_html().encode("utf-8"), "text/html; charset=utf-8")
-            return
         if path == "/api/jobs":
             self._send_json({"jobs": [job.to_dict(include_paths=False) for job in self.engine.list_jobs()]})
             return
@@ -128,6 +73,14 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 5 and parts[:2] == ["api", "jobs"] and parts[3] == "download":
             self._download(parts[2], parts[4])
+            return
+        if path == "/":
+            self._send_bytes(render_index_html().encode("utf-8"), "text/html; charset=utf-8")
+            return
+        if self._send_static(path):
+            return
+        if not path.startswith("/api/") and "." not in Path(path).name:
+            self._send_bytes(render_index_html().encode("utf-8"), "text/html; charset=utf-8")
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -148,6 +101,18 @@ class BabelWebHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:
         if os.environ.get("BABEL_WEB_LOGS"):
             super().log_message(format, *args)
+
+    def _send_static(self, request_path: str) -> bool:
+        static_path = _resolve_static_path(request_path)
+        if static_path is None:
+            return False
+        content_type = mimetypes.guess_type(static_path.name)[0] or "application/octet-stream"
+        if static_path.suffix == ".js":
+            content_type = "text/javascript; charset=utf-8"
+        elif static_path.suffix in {".css", ".svg"}:
+            content_type = f"{content_type}; charset=utf-8"
+        self._send_bytes(static_path.read_bytes(), content_type)
+        return True
 
     def _create_job(self) -> None:
         try:
@@ -209,7 +174,15 @@ class BabelWebHandler(BaseHTTPRequestHandler):
                     model=data.get("model", ""),
                     target_language=data.get("target_language", "Simplified Chinese"),
                     temperature=float(data.get("temperature", 0.2)),
+                    request_timeout=normalize_request_timeout(
+                        data.get("request_timeout", DEFAULT_REQUEST_TIMEOUT)
+                    ),
+                    max_retries=normalize_max_retries(data.get("max_retries", DEFAULT_MAX_RETRIES)),
+                    max_concurrency=normalize_max_concurrency(
+                        data.get("max_concurrency", DEFAULT_MAX_CONCURRENCY)
+                    ),
                 ),
+                resume=data.get("resume") is True,
             )
         except KeyError:
             self.send_error(HTTPStatus.NOT_FOUND, "job not found")
@@ -253,6 +226,21 @@ class BabelWebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
+
+
+def _resolve_static_path(request_path: str) -> Path | None:
+    if not STATIC_DIR.exists():
+        return None
+    relative = unquote(request_path).lstrip("/")
+    if not relative or relative.startswith("."):
+        return None
+    root = STATIC_DIR.resolve()
+    candidate = (STATIC_DIR / relative).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
 
 
 def _parse_multipart_form(content_type: str, body: bytes) -> dict[str, FormPart]:

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/brand/babel-icon.svg" alt="Babel icon" width="116" height="116">
+  <img src="docs/assets/brand/babel-icon.png" alt="Babel icon" width="116" height="116">
 </p>
 
 <h1 align="center">Babel</h1>
@@ -20,7 +20,7 @@
 
 Babel turns an ebook into structured translation batches, rebuilds a validated EPUB intermediate, then exports the final translated book in the format you choose.
 
-It is designed for workflows where a main agent maintains a global glossary and context ledger while Codex/subagents translate independent chapter batches in parallel. The core pipeline is model-agnostic; the Web/job layer can call user-configured providers such as OpenAI-compatible endpoints or Anthropic Claude.
+It is designed for workflows where a main agent maintains a global glossary and context ledger while Codex/subagents translate independent chapter batches in parallel. The self-hosted Web/job runtime can also translate batches automatically with concurrent provider calls. The core pipeline is model-agnostic; the Web/job layer can call user-configured providers such as OpenAI-compatible endpoints or Anthropic Claude.
 
 ## Why Babel
 
@@ -30,6 +30,7 @@ Most quick ebook translation scripts flatten a book into text and destroy the re
 - Extracts only human-readable XHTML blocks into JSONL batches.
 - Generates a glossary scaffold and worker instructions before translation begins.
 - Validates each translated batch before it can be applied.
+- Runs Web translations with configurable batch concurrency, timeout, retries, and failed-job resume.
 - Rejects common fake/placeholder translations such as `第 N 段译文`.
 - Repackages a validated EPUB intermediate with the required uncompressed `mimetype` entry.
 - Exports the final translated book as EPUB or a Calibre-backed target format.
@@ -58,7 +59,7 @@ The `--output-book` path must include the selected extension, for example `outpu
 
 ## Status
 
-Babel is early-stage but usable. It now includes a dependency-free CLI core, a self-hosted Web UI, Docker deployment, a Codex skill, and a Claude MCP server.
+Babel is early-stage but usable. It now includes a dependency-free CLI core, a React/Vite self-hosted Web UI, Docker deployment, a Codex skill, and a Claude MCP server.
 
 ## Easiest Start: Docker Web UI
 
@@ -74,7 +75,9 @@ Open:
 http://127.0.0.1:7860
 ```
 
-The Web UI lets you upload an ebook, choose the final output format, review/edit the glossary, configure an API provider, watch progress, and download the translated book plus report.
+The Web UI lets you upload an ebook, choose the final output format, review/edit the glossary, configure an API provider, choose concurrency/timeout/retry settings, watch terminal-style progress, resume failed jobs, and download the translated book plus report.
+
+The top-right `Guide` button opens the recommended operation flow. The language toggle supports English and Simplified Chinese and is saved in `localStorage`.
 
 Docker includes Calibre for MOBI/AZW3/PDF/DOCX/CBZ input conversion and non-EPUB output export. Private job data is stored in the `babel-data` volume. Do not expose this server publicly without adding authentication.
 
@@ -98,17 +101,42 @@ python3 -m unittest discover -s tests -v
 
 ## Web UI From Source
 
+Build the React UI into the Python package static directory:
+
+```bash
+npm install --prefix web
+npm run build --prefix web
+```
+
+Start the bundled Web UI:
+
 ```bash
 babel-server --host 127.0.0.1 --port 7860 --data-dir ./babel-data
 ```
 
 Open `http://127.0.0.1:7860`.
 
+For frontend development, run the backend and Vite dev server separately:
+
+```bash
+babel-server --host 127.0.0.1 --port 7860 --data-dir ./babel-data
+npm run dev --prefix web
+```
+
+Vite runs on `http://127.0.0.1:5173` and proxies `/api` to the local Babel server.
+
 Supported MVP providers:
 
 - `OpenAI Compatible`: any `/v1/chat/completions`-compatible endpoint.
 - `Anthropic Claude`: Anthropic Messages API.
 - `Fake Dry Run`: deterministic local output for testing the pipeline without spending tokens.
+
+Runtime controls:
+
+- `Concurrency`: default `3`, clamped to `1..8`.
+- `Request timeout`: default `300` seconds.
+- `Retries`: default `1`; retryable failures are timeout, HTTP 429, and HTTP 5xx. HTTP 400/401 are not retried.
+- Failed batches continue to be recorded while other batches keep running. After all workers finish, use `Resume Translation` to rerun only missing, damaged, or invalid batch outputs.
 
 ## CLI Quick Start
 
@@ -260,6 +288,8 @@ Install Babel, then add this MCP server to Claude Desktop:
 ```
 
 See [integrations/claude](integrations/claude).
+
+The `start_translation` MCP tool accepts optional `resume`, `max_concurrency`, `request_timeout`, and `max_retries` fields. Defaults match the Web UI.
 
 ## Plugin Or Skill?
 

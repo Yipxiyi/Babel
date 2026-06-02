@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/brand/babel-icon.svg" alt="Babel icon" width="116" height="116">
+  <img src="docs/assets/brand/babel-icon.png" alt="Babel icon" width="116" height="116">
 </p>
 
 <h1 align="center">Babel</h1>
@@ -20,7 +20,7 @@
 
 Babel 会把电子书转成结构化翻译批次，在译文 XHTML 片段通过校验后，先重建有效 EPUB 中间件，再导出用户选择的最终格式。
 
-它适合这样的工作流：主 agent 维护全局 glossary 和上下文账本，Codex/subagent 并发处理章节批次。核心管线不绑定具体模型；Web/job 层可以调用用户自配置的 OpenAI-compatible endpoint 或 Anthropic Claude。
+它适合这样的工作流：主 agent 维护全局 glossary 和上下文账本，Codex/subagent 并发处理章节批次。自部署 Web/job runtime 也可以自动并发调用 provider 翻译批次。核心管线不绑定具体模型；Web/job 层可以调用用户自配置的 OpenAI-compatible endpoint 或 Anthropic Claude。
 
 ## 为什么需要 Babel
 
@@ -30,6 +30,7 @@ Babel 会把电子书转成结构化翻译批次，在译文 XHTML 片段通过�
 - 只抽取 XHTML 中人类可读的文本块，生成 JSONL 批次。
 - 翻译前生成 glossary 脚手架和 worker 指令。
 - 每个翻译批次必须先通过校验，才能回写。
+- Web 翻译支持可配置批次并发、请求超时、重试和失败任务继续。
 - 拒绝 `第 N 段译文` 这类假翻译/占位文本。
 - 按 EPUB 要求重建经过校验的 EPUB 中间件，且将 `mimetype` 作为第一个文件并保持不压缩。
 - 将最终译本导出为 EPUB 或基于 Calibre 的目标格式。
@@ -58,7 +59,7 @@ EPUB 输出不需要外部工具。非 EPUB 输出会从校验后的 EPUB 中间
 
 ## 当前状态
 
-Babel 仍处于早期阶段，但已经可用。当前包含无运行时依赖的 CLI core、自部署 Web UI、Docker 部署、Codex skill 和 Claude MCP server。
+Babel 仍处于早期阶段，但已经可用。当前包含无运行时依赖的 CLI core、React/Vite 自部署 Web UI、Docker 部署、Codex skill 和 Claude MCP server。
 
 ## 最简单方式：Docker Web UI
 
@@ -74,7 +75,9 @@ docker compose up --build
 http://127.0.0.1:7860
 ```
 
-Web UI 支持上传电子书、选择最终输出格式、查看/编辑 glossary、配置 API provider、查看进度，并下载翻译后的电子书和报告。
+Web UI 支持上传电子书、选择最终输出格式、查看/编辑 glossary、配置 API provider、选择并发/超时/重试设置、查看终端式进度、失败后继续任务，并下载翻译后的电子书和报告。
+
+右上角 `Guide` 按钮会弹出推荐操作流程。语言切换支持英文和简体中文，并会保存到 `localStorage`。
 
 Docker 镜像内置 Calibre，可处理 MOBI/AZW3/PDF/DOCX/CBZ 等输入转换和非 EPUB 输出导出，并把私有任务数据保存在 `babel-data` volume 中。不要在没有认证保护的情况下把这个服务暴露到公网。
 
@@ -98,17 +101,42 @@ python3 -m unittest discover -s tests -v
 
 ## 从源码启动 Web UI
 
+先把 React UI 构建到 Python 包的静态目录：
+
+```bash
+npm install --prefix web
+npm run build --prefix web
+```
+
+启动内置 Web UI：
+
 ```bash
 babel-server --host 127.0.0.1 --port 7860 --data-dir ./babel-data
 ```
 
 打开 `http://127.0.0.1:7860`。
 
+前端开发时，可以分别启动后端和 Vite dev server：
+
+```bash
+babel-server --host 127.0.0.1 --port 7860 --data-dir ./babel-data
+npm run dev --prefix web
+```
+
+Vite 运行在 `http://127.0.0.1:5173`，并把 `/api` 代理到本地 Babel server。
+
 MVP 支持的 provider：
 
 - `OpenAI Compatible`：任何兼容 `/v1/chat/completions` 的 endpoint。
 - `Anthropic Claude`：Anthropic Messages API。
 - `Fake Dry Run`：本地确定性输出，用来测试管线，不消耗 tokens。
+
+运行参数：
+
+- `Concurrency`：默认 `3`，后端强制限制为 `1..8`。
+- `Request timeout`：默认 `300` 秒。
+- `Retries`：默认 `1`；仅 timeout、HTTP 429、HTTP 5xx 会重试。HTTP 400/401 不会重试。
+- 单个批次失败后，其他批次会继续执行。所有 worker 结束后，如果仍有失败批次，点击 `Resume Translation` 只重跑缺失、损坏或未通过校验的批次。
 
 ## CLI 快速开始
 
@@ -260,6 +288,8 @@ cp integrations/codex/babel/SKILL.md ~/.codex/skills/babel/SKILL.md
 ```
 
 详见 [integrations/claude](integrations/claude)。
+
+`start_translation` MCP tool 支持可选字段：`resume`、`max_concurrency`、`request_timeout`、`max_retries`，默认值与 Web UI 一致。
 
 ## Plugin 还是 Skill？
 

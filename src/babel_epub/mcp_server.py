@@ -9,7 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from .jobs import BabelJobEngine, JobRequest
-from .providers import ProviderSettings
+from .providers import (
+    DEFAULT_MAX_CONCURRENCY,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_REQUEST_TIMEOUT,
+    ProviderSettings,
+    normalize_max_concurrency,
+    normalize_max_retries,
+    normalize_request_timeout,
+)
 
 
 def tool(name: str, description: str, properties: dict[str, Any], required: list[str] | None = None) -> dict:
@@ -47,6 +55,10 @@ TOOLS = [
             "api_key": {"type": "string"},
             "model": {"type": "string"},
             "target_language": {"type": "string", "default": "Simplified Chinese"},
+            "resume": {"type": "boolean", "default": False},
+            "max_concurrency": {"type": "integer", "default": DEFAULT_MAX_CONCURRENCY, "minimum": 1, "maximum": 8},
+            "request_timeout": {"type": "number", "default": DEFAULT_REQUEST_TIMEOUT, "minimum": 30},
+            "max_retries": {"type": "integer", "default": DEFAULT_MAX_RETRIES, "minimum": 0, "maximum": 5},
         },
         ["job_id", "provider", "model"],
     ),
@@ -74,7 +86,7 @@ class BabelMCP:
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "babel-mcp", "version": "0.4.0"},
+                    "serverInfo": {"name": "babel-mcp", "version": "0.6.0"},
                 },
             }
         if method == "notifications/initialized":
@@ -123,7 +135,15 @@ class BabelMCP:
                     api_key=arguments.get("api_key", ""),
                     model=arguments.get("model", ""),
                     target_language=arguments.get("target_language", "Simplified Chinese"),
+                    request_timeout=normalize_request_timeout(
+                        arguments.get("request_timeout", DEFAULT_REQUEST_TIMEOUT)
+                    ),
+                    max_retries=normalize_max_retries(arguments.get("max_retries", DEFAULT_MAX_RETRIES)),
+                    max_concurrency=normalize_max_concurrency(
+                        arguments.get("max_concurrency", DEFAULT_MAX_CONCURRENCY)
+                    ),
                 ),
+                resume=arguments.get("resume") is True,
             )
             return {"job": job.to_dict(include_paths=True)}
         if name == "job_status":

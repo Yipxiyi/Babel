@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
@@ -15,7 +16,11 @@ from xml.etree import ElementTree as ET
 from .pipeline import element_to_snippet, parse_snippet
 
 
-Transport = Callable[[str, dict[str, str], dict[str, Any]], dict[str, Any]]
+Transport = Callable[..., dict[str, Any]]
+DEFAULT_REQUEST_TIMEOUT = 300.0
+DEFAULT_MAX_RETRIES = 1
+DEFAULT_MAX_CONCURRENCY = 3
+MAX_CONCURRENCY_LIMIT = 8
 
 
 @dataclass(frozen=True)
@@ -26,6 +31,9 @@ class ProviderSettings:
     base_url: str = ""
     api_key: str = ""
     temperature: float = 0.2
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT
+    max_retries: int = DEFAULT_MAX_RETRIES
+    max_concurrency: int = DEFAULT_MAX_CONCURRENCY
 
 
 class TranslationProvider(ABC):
@@ -34,7 +42,12 @@ class TranslationProvider(ABC):
         """Translate source batch rows into `id` + `translated_html` rows."""
 
 
-def default_transport(url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
+def default_transport(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    timeout: float = DEFAULT_REQUEST_TIMEOUT,
+) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -42,17 +55,104 @@ def default_transport(url: str, headers: dict[str, str], payload: dict[str, Any]
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=180) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"provider HTTP {exc.code}: {detail}") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise TimeoutError(f"provider read timed out after {timeout:g}s") from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            raise TimeoutError(f"provider read timed out after {timeout:g}s") from exc
+        raise
+
+
+def normalize_max_concurrency(value: int | float | str | None) -> int:
+    try:
+        parsed = int(value) if value is not None else DEFAULT_MAX_CONCURRENCY
+    except (TypeError, ValueError):
+        parsed = DEFAULT_MAX_CONCURRENCY
+    return min(max(parsed, 1), MAX_CONCURRENCY_LIMIT)
+
+
+def normalize_max_retries(value: int | float | str | None) -> int:
+    try:
+        parsed = int(value) if value is not None else DEFAULT_MAX_RETRIES
+    except (TypeError, ValueError):
+        parsed = DEFAULT_MAX_RETRIES
+    return min(max(parsed, 0), 5)
+
+
+def normalize_request_timeout(value: int | float | str | None) -> float:
+    try:
+        parsed = float(value) if value is not None else DEFAULT_REQUEST_TIMEOUT
+    except (TypeError, ValueError):
+        parsed = DEFAULT_REQUEST_TIMEOUT
+    return min(max(parsed, 30.0), 1800.0)
+
+
+def is_retryable_provider_error(error: Exception) -> bool:
+    if isinstance(error, TimeoutError):
+        return True
+    message = str(error).lower()
+    if "timed out" in message or "timeout" in message:
+        return True
+    match = re.search(r"provider http\s+(\d{3})", message)
+    if not match:
+        return False
+    status = int(match.group(1))
+    return status == 429 or 500 <= status <= 599
+
+
+def _is_official_openai_base_url(base_url: str) -> bool:
+    value = base_url.lower().strip()
+    return "api.openai.com" in value
+
+
+def validate_provider_settings(settings: ProviderSettings) -> ProviderSettings:
+    provider = settings.provider.lower().strip()
+    model = settings.model.strip()
+    base_url = settings.base_url.strip()
+    api_key = settings.api_key.strip()
+    if provider in {"fake", "dry-run", "dry_run"}:
+        return settings
+    if not model:
+        raise ValueError("model is required")
+    if provider in {"openai", "openai-compatible", "openai_compatible", "compatible"}:
+        if not base_url:
+            raise ValueError("base_url is required for OpenAI-compatible providers")
+        if _is_official_openai_base_url(base_url) and not api_key:
+            raise ValueError("api_key is required for the official OpenAI endpoint")
+        return settings
+    if provider in {"anthropic", "claude"}:
+        if not api_key:
+            raise ValueError("api_key is required for Anthropic")
+        return settings
+    raise ValueError(f"unsupported provider: {settings.provider}")
+
+
+def call_transport(
+    transport: Transport,
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    timeout: float,
+) -> dict[str, Any]:
+    if transport is default_transport:
+        return transport(url, headers, payload, timeout)
+    return transport(url, headers, payload)
 
 
 def strip_markdown_fence(text: str) -> str:
     value = text.strip()
     match = re.fullmatch(r"```(?:json|jsonl)?\s*(.*?)\s*```", value, flags=re.DOTALL)
     return match.group(1).strip() if match else value
+
+
+def safe_preview(text: str, limit: int = 240) -> str:
+    compact = re.sub(r"\s+", " ", text).strip()
+    return compact[:limit]
 
 
 def parse_translated_rows(text: str) -> list[dict]:
@@ -76,7 +176,10 @@ def parse_translated_rows(text: str) -> list[dict]:
         try:
             row = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"provider returned invalid JSONL at line {line_number}: {exc}") from exc
+            raise ValueError(
+                f"provider returned invalid JSONL at line {line_number}: {exc}; "
+                f"preview={safe_preview(value)}"
+            ) from exc
         if not isinstance(row, dict):
             raise ValueError(f"provider returned non-object JSONL row at line {line_number}")
         rows.append(row)
@@ -120,6 +223,7 @@ class OpenAICompatibleProvider(TranslationProvider):
         model: str,
         target_language: str,
         temperature: float = 0.2,
+        request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
         transport: Transport = default_transport,
     ) -> None:
         if not base_url:
@@ -131,6 +235,7 @@ class OpenAICompatibleProvider(TranslationProvider):
         self.model = model
         self.target_language = target_language
         self.temperature = temperature
+        self.request_timeout = normalize_request_timeout(request_timeout)
         self.transport = transport
 
     def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
@@ -145,7 +250,7 @@ class OpenAICompatibleProvider(TranslationProvider):
             "messages": batch_prompt(rows, glossary, context, self.target_language),
             "temperature": self.temperature,
         }
-        response = self.transport(endpoint, headers, payload)
+        response = call_transport(self.transport, endpoint, headers, payload, self.request_timeout)
         try:
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -162,6 +267,7 @@ class AnthropicProvider(TranslationProvider):
         target_language: str,
         base_url: str = "https://api.anthropic.com/v1",
         temperature: float = 0.2,
+        request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
         transport: Transport = default_transport,
     ) -> None:
         if not api_key:
@@ -173,13 +279,15 @@ class AnthropicProvider(TranslationProvider):
         self.target_language = target_language
         self.base_url = base_url.rstrip("/")
         self.temperature = temperature
+        self.request_timeout = normalize_request_timeout(request_timeout)
         self.transport = transport
 
     def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
         messages = batch_prompt(rows, glossary, context, self.target_language)
         system = messages[0]["content"]
         user = messages[1]["content"]
-        response = self.transport(
+        response = call_transport(
+            self.transport,
             f"{self.base_url}/messages",
             {
                 "Content-Type": "application/json",
@@ -193,6 +301,7 @@ class AnthropicProvider(TranslationProvider):
                 "max_tokens": 8192,
                 "temperature": self.temperature,
             },
+            self.request_timeout,
         )
         try:
             content_items = response["content"]
@@ -222,6 +331,7 @@ class FakeProvider(TranslationProvider):
 
 
 def make_provider(settings: ProviderSettings) -> TranslationProvider:
+    settings = validate_provider_settings(settings)
     provider = settings.provider.lower().strip()
     if provider in {"fake", "dry-run", "dry_run"}:
         return FakeProvider()
@@ -232,6 +342,7 @@ def make_provider(settings: ProviderSettings) -> TranslationProvider:
             model=settings.model,
             target_language=settings.target_language,
             temperature=settings.temperature,
+            request_timeout=settings.request_timeout,
         )
     if provider in {"anthropic", "claude"}:
         return AnthropicProvider(
@@ -240,5 +351,6 @@ def make_provider(settings: ProviderSettings) -> TranslationProvider:
             model=settings.model,
             target_language=settings.target_language,
             temperature=settings.temperature,
+            request_timeout=settings.request_timeout,
         )
     raise ValueError(f"unsupported provider: {settings.provider}")

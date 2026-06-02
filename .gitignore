@@ -10,6 +10,8 @@ venv/
 build/
 dist/
 *.egg-info/
+web/node_modules/
+web/tsconfig.tsbuildinfo
 
 # Local EPUB workspaces and private reading material.
 *.epub

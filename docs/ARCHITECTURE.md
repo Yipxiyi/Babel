@@ -2,7 +2,7 @@
 
 ## Shape
 
-Babel is a dependency-free Python package with multiple adapters. The core value is file transformation and validation; Web, Docker, Codex, and Claude are integration layers over the same pipeline.
+Babel is a dependency-free Python package at the core with multiple adapters. The core value is file transformation and validation; Web, Docker, Codex, and Claude are integration layers over the same pipeline. The Web UI is React/Vite source under `web/`, built into `src/babel_epub/static/`, then served by `babel-server`.
 
 ```mermaid
 flowchart LR
@@ -53,9 +53,17 @@ A plugin would couple Babel to one agent host. A skill alone would only document
 
 ## Job Engine
 
-`babel_epub.jobs` owns local job state under `BABEL_DATA_DIR`. It prepares workspaces, reads and writes the glossary, calls provider adapters batch by batch, validates outputs, applies translations, exports the selected output format, audits the EPUB intermediate, and writes a report.
+`babel_epub.jobs` owns local job state under `BABEL_DATA_DIR`. It prepares workspaces, reads and writes the glossary, calls provider adapters for each batch, validates outputs, applies translations, exports the selected output format, audits the EPUB intermediate, and writes a report.
 
 MVP is single-user and local-first. API keys are accepted at start time and are not written to durable job state.
+
+Translation runs use a `ThreadPoolExecutor` with default `max_concurrency=3` and a hard range of `1..8`. Each batch attempt creates its own provider instance. The glossary and context are read once at run start so concurrent batches share a stable snapshot.
+
+Batch outputs are validated before they are written. If one batch fails, the engine records a `batch-failed` event and continues the other active and queued batches. After all workers finish, any failed batch leaves the job in `failed`; resume skips existing valid outputs and reruns only missing, damaged, or invalid batches.
+
+Provider calls support a per-request timeout and retry count. Timeout, HTTP 429, and HTTP 5xx are retryable; HTTP 400/401 are treated as configuration or request errors and are not retried.
+
+Jobs persist event logs plus active and failed batch metadata so the Web UI can restore progress after refresh and resume failed translations from existing valid batch outputs.
 
 ## Data Policy
 

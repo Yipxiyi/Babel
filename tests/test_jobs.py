@@ -2,12 +2,40 @@ from __future__ import annotations
 
 import zipfile
 import tempfile
+import json
+import threading
+import time
 import unittest
 from pathlib import Path
 
 from babel_epub.jobs import BabelJobEngine, JobRequest, ProviderSettings
-from babel_epub.providers import FakeProvider, OpenAICompatibleProvider
+from babel_epub.providers import FakeProvider, OpenAICompatibleProvider, parse_translated_rows
 from test_pipeline import make_minimal_epub
+
+
+def make_epub_with_paragraphs(path: Path, paragraph_count: int) -> None:
+    base_epub = path.with_name("base.epub")
+    make_minimal_epub(base_epub)
+    chapter = """<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>Chapter 1</title><link rel="stylesheet" href="style.css"/></head>
+  <body>
+    <h1 id="chapter-1">Chapter One</h1>
+{paragraphs}
+  </body>
+</html>
+""".format(
+        paragraphs="\n".join(
+            f'    <p class="body">Paragraph {index} for translation.</p>'
+            for index in range(1, paragraph_count + 1)
+        )
+    )
+    with zipfile.ZipFile(base_epub) as source_archive, zipfile.ZipFile(path, "w") as target_archive:
+        for info in source_archive.infolist():
+            content = source_archive.read(info.filename)
+            if info.filename == "OEBPS/chapter1.xhtml":
+                content = chapter.encode("utf-8")
+            target_archive.writestr(info, content)
 
 
 class JobEngineTests(unittest.TestCase):
@@ -38,6 +66,7 @@ class JobEngineTests(unittest.TestCase):
             )
 
             self.assertEqual(finished.status, "completed")
+            self.assertEqual(finished.max_concurrency, 3)
             self.assertEqual(finished.completed_batches, 1)
             self.assertEqual(finished.total_batches, 1)
             self.assertTrue(finished.output_epub and finished.output_epub.exists())
@@ -49,6 +78,301 @@ class JobEngineTests(unittest.TestCase):
                 self.assertIsNone(archive.testzip())
                 chapter = archive.read("OEBPS/chapter1.xhtml").decode("utf-8")
             self.assertIn("测试翻译", chapter)
+
+    def test_failed_job_records_events_and_failed_batch(self) -> None:
+        class FailOnSecondBatchProvider(FakeProvider):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                self.calls += 1
+                if self.calls == 2:
+                    raise ValueError("provider returned invalid JSONL at line 1: preview=<html>")
+                return super().translate_batch(rows, glossary, context)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            provider = FailOnSecondBatchProvider()
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: provider)
+            job = engine.create_job(
+                JobRequest(
+                    filename="input.epub",
+                    content=input_epub.read_bytes(),
+                    target_language="Simplified Chinese",
+                    max_blocks=1,
+                )
+            )
+
+            failed = engine.run_job(
+                job.job_id,
+                ProviderSettings(
+                    provider="fake",
+                    model="fake-model",
+                    target_language="Simplified Chinese",
+                    max_concurrency=1,
+                ),
+            )
+
+            self.assertEqual(failed.status, "failed")
+            self.assertEqual(failed.completed_batches, 1)
+            self.assertEqual(failed.failed_batch["batch"], 2)
+            self.assertEqual(len(failed.failed_batches), 1)
+            self.assertIsNone(failed.current_batch)
+            self.assertFalse(failed.active_batches)
+            self.assertTrue(failed.last_active_at)
+            self.assertIn("provider returned invalid JSONL", failed.message)
+            self.assertIn("failed", [event["type"] for event in failed.events])
+            self.assertIn("batch-failed", [event["type"] for event in failed.events])
+            self.assertIn("batch-start", [event["type"] for event in failed.events])
+            self.assertIn("batch-done", [event["type"] for event in failed.events])
+
+    def test_official_openai_without_api_key_fails_before_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: FakeProvider())
+            job = engine.create_job(
+                JobRequest(
+                    filename="input.epub",
+                    content=input_epub.read_bytes(),
+                    target_language="Simplified Chinese",
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "api_key is required"):
+                engine.start_job(
+                    job.job_id,
+                    ProviderSettings(
+                        provider="openai-compatible",
+                        base_url="https://api.openai.com/v1",
+                        api_key="",
+                        model="gpt-4.1",
+                        target_language="Simplified Chinese",
+                    ),
+                )
+
+            failed = engine.get_job(job.job_id)
+            self.assertEqual(failed.status, "failed")
+            self.assertNotEqual(failed.status, "running")
+            self.assertIn("api_key is required", failed.message)
+            self.assertIn("failed", [event["type"] for event in failed.events])
+
+    def test_retryable_timeout_records_retry_event_and_completes(self) -> None:
+        class TimeoutOnceProvider(FakeProvider):
+            calls = 0
+
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                type(self).calls += 1
+                if type(self).calls == 1:
+                    raise TimeoutError("provider read timed out")
+                return super().translate_batch(rows, glossary, context)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: TimeoutOnceProvider())
+            job = engine.create_job(
+                JobRequest(
+                    filename="input.epub",
+                    content=input_epub.read_bytes(),
+                    target_language="Simplified Chinese",
+                )
+            )
+
+            finished = engine.run_job(
+                job.job_id,
+                ProviderSettings(
+                    provider="fake",
+                    model="fake-model",
+                    target_language="Simplified Chinese",
+                    max_concurrency=1,
+                    max_retries=1,
+                ),
+            )
+
+            self.assertEqual(finished.status, "completed")
+            self.assertIn("batch-retry", [event["type"] for event in finished.events])
+
+    def test_max_concurrency_limits_parallel_batch_execution(self) -> None:
+        class SlowCountingProvider(FakeProvider):
+            active = 0
+            max_seen = 0
+            lock = threading.Lock()
+
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                with type(self).lock:
+                    type(self).active += 1
+                    type(self).max_seen = max(type(self).max_seen, type(self).active)
+                try:
+                    time.sleep(0.05)
+                    return super().translate_batch(rows, glossary, context)
+                finally:
+                    with type(self).lock:
+                        type(self).active -= 1
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_epub_with_paragraphs(input_epub, paragraph_count=6)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: SlowCountingProvider())
+            job = engine.create_job(
+                JobRequest(
+                    filename="input.epub",
+                    content=input_epub.read_bytes(),
+                    target_language="Simplified Chinese",
+                    max_blocks=1,
+                )
+            )
+
+            finished = engine.run_job(
+                job.job_id,
+                ProviderSettings(
+                    provider="fake",
+                    model="fake-model",
+                    target_language="Simplified Chinese",
+                    max_concurrency=3,
+                ),
+            )
+
+            self.assertEqual(finished.status, "completed")
+            self.assertEqual(finished.completed_batches, finished.total_batches)
+            self.assertGreater(SlowCountingProvider.max_seen, 1)
+            self.assertLessEqual(SlowCountingProvider.max_seen, 3)
+            self.assertEqual(finished.max_concurrency, 3)
+
+    def test_one_failed_batch_continues_other_batches_then_job_fails(self) -> None:
+        class FailParagraphTwoProvider(FakeProvider):
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                if any("Paragraph 2" in row.get("source_text", "") for row in rows):
+                    raise RuntimeError("provider HTTP 500: overloaded")
+                return super().translate_batch(rows, glossary, context)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_epub_with_paragraphs(input_epub, paragraph_count=4)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: FailParagraphTwoProvider())
+            job = engine.create_job(
+                JobRequest(
+                    filename="input.epub",
+                    content=input_epub.read_bytes(),
+                    target_language="Simplified Chinese",
+                    max_blocks=1,
+                )
+            )
+
+            failed = engine.run_job(
+                job.job_id,
+                ProviderSettings(
+                    provider="fake",
+                    model="fake-model",
+                    target_language="Simplified Chinese",
+                    max_concurrency=3,
+                    max_retries=0,
+                ),
+            )
+
+            self.assertEqual(failed.status, "failed")
+            self.assertEqual(failed.completed_batches, failed.total_batches - 1)
+            self.assertEqual(len(failed.failed_batches), 1)
+            self.assertFalse(failed.active_batches)
+            event_types = [event["type"] for event in failed.events]
+            self.assertIn("batch-failed", event_types)
+            self.assertEqual(event_types.count("batch-done"), failed.completed_batches)
+
+    def test_resume_skips_existing_valid_batches(self) -> None:
+        class FailOnSecondBatchProvider(FakeProvider):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                self.calls += 1
+                if self.calls == 2:
+                    raise ValueError("provider returned invalid JSONL at line 1")
+                return super().translate_batch(rows, glossary, context)
+
+        class CountingFakeProvider(FakeProvider):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                self.calls += 1
+                return super().translate_batch(rows, glossary, context)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            failing_provider = FailOnSecondBatchProvider()
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: failing_provider)
+            job = engine.create_job(
+                JobRequest(
+                    filename="input.epub",
+                    content=input_epub.read_bytes(),
+                    target_language="Simplified Chinese",
+                    max_blocks=1,
+                )
+            )
+            failed = engine.run_job(
+                job.job_id,
+                ProviderSettings(
+                    provider="fake",
+                    model="fake-model",
+                    target_language="Simplified Chinese",
+                    max_concurrency=1,
+                ),
+            )
+            self.assertEqual(failed.status, "failed")
+            self.assertEqual(failed.completed_batches, 1)
+
+            resume_provider = CountingFakeProvider()
+            engine.provider_factory = lambda _settings: resume_provider
+            finished = engine.run_job(
+                job.job_id,
+                ProviderSettings(
+                    provider="fake",
+                    model="fake-model",
+                    target_language="Simplified Chinese",
+                    max_concurrency=3,
+                ),
+                resume=True,
+            )
+
+            self.assertEqual(finished.status, "completed")
+            self.assertEqual(finished.completed_batches, finished.total_batches)
+            self.assertEqual(resume_provider.calls, 1)
+            self.assertIn("batch-skip", [event["type"] for event in finished.events])
+
+    def test_old_job_json_without_concurrency_fields_still_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: FakeProvider())
+            job = engine.create_job(
+                JobRequest(
+                    filename="input.epub",
+                    content=input_epub.read_bytes(),
+                    target_language="Simplified Chinese",
+                )
+            )
+            state_path = job.work_dir / "job.json"
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            for key in ("active_batches", "failed_batches", "max_concurrency", "events", "last_active_at"):
+                data.pop(key, None)
+            state_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+            reloaded = BabelJobEngine(tmp_path / "jobs")
+            loaded = reloaded.get_job(job.job_id)
+
+            self.assertEqual(loaded.max_concurrency, 3)
+            self.assertEqual(loaded.active_batches, [])
+            self.assertEqual(loaded.failed_batches, [])
+            self.assertTrue(loaded.events)
 
     def test_openai_compatible_provider_builds_messages_and_parses_jsonl(self) -> None:
         captured = {}
@@ -84,6 +408,10 @@ class JobEngineTests(unittest.TestCase):
         self.assertEqual(captured["headers"]["Authorization"], "Bearer secret")
         self.assertEqual(captured["payload"]["model"], "demo-model")
         self.assertEqual(rows, [{"id": "a::0001", "translated_html": "<p>你好</p>"}])
+
+    def test_invalid_provider_jsonl_reports_safe_preview(self) -> None:
+        with self.assertRaisesRegex(ValueError, "preview=not json"):
+            parse_translated_rows("not json\nsecond line")
 
 
 if __name__ == "__main__":

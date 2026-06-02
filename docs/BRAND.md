@@ -31,6 +31,7 @@ Avoid:
 
 ## Visual Identity
 
-- Icon: `docs/assets/brand/babel-icon.svg`
-- Palette: warm paper, ink black, and clay accent.
+- Primary icon: `docs/assets/brand/babel-icon.png`
+- Legacy vector mark: `docs/assets/brand/babel-icon.svg`
+- Palette: warm paper, ink black, clay/oxide accent, soft amber glow, and restrained blue-green terminal light from the icon.
 - Motif: stacked text blocks forming a tower.
