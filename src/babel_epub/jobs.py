@@ -26,16 +26,18 @@ from .providers import (
     DEFAULT_MAX_CONCURRENCY,
     ProviderSettings,
     TranslationProvider,
-    is_retryable_provider_error,
+    is_retryable_translation_error,
     make_provider,
     normalize_max_concurrency,
     normalize_max_retries,
+    repair_translated_rows_structure,
     validate_provider_settings,
 )
 
 
 ProviderFactory = Callable[[ProviderSettings], TranslationProvider]
 MAX_EVENTS = 500
+DEFAULT_MAX_BLOCKS = 20
 
 
 def utc_now() -> str:
@@ -93,7 +95,7 @@ class JobRequest:
     title: str = ""
     language: str = "zh-CN"
     output_format: str = ".epub"
-    max_blocks: int = 80
+    max_blocks: int = DEFAULT_MAX_BLOCKS
 
 
 @dataclass
@@ -171,6 +173,14 @@ class BabelJobEngine:
             try:
                 data = json.loads(state_path.read_text(encoding="utf-8"))
                 job = self._job_from_dict(data)
+                if job.status == "running":
+                    job.status = "failed"
+                    job.active_batches = []
+                    job.current_batch = None
+                    job.message = "Interrupted before completion. Resume to continue from valid translated batches."
+                    job.errors.append("job was interrupted before completion")
+                    self._append_event(job, "failed", job.message, batch=job.failed_batch)
+                    self._save_job(job)
                 self._jobs[job.job_id] = job
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
                 continue
@@ -385,7 +395,7 @@ class BabelJobEngine:
 
     def list_jobs(self) -> list[BabelJob]:
         with self._lock:
-            return sorted(self._jobs.values(), key=lambda job: job.job_id, reverse=True)
+            return sorted(self._jobs.values(), key=lambda job: (job.last_active_at, job.job_id), reverse=True)
 
     def get_job(self, job_id: str) -> BabelJob:
         with self._lock:
@@ -475,13 +485,14 @@ class BabelJobEngine:
             try:
                 provider = self.provider_factory(settings)
                 translated_rows = provider.translate_batch(batch_rows, glossary=glossary, context=context)
+                translated_rows = repair_translated_rows_structure(batch_rows, translated_rows)
                 issues = validate_translation_rows(batch_rows, translated_rows)
                 if issues:
                     raise ValueError(f"{out_path} has validation issues:\n" + "\n".join(issues[:20]))
                 write_jsonl(out_path, translated_rows)
                 return
             except Exception as exc:
-                if attempt < max_attempts and is_retryable_provider_error(exc):
+                if attempt < max_attempts and is_retryable_translation_error(exc):
                     next_attempt = attempt + 1
                     self._retry_batch(job_id, batch, next_attempt, max_attempts, exc)
                     attempt = next_attempt

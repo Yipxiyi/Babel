@@ -13,12 +13,12 @@ from dataclasses import dataclass
 from typing import Any
 from xml.etree import ElementTree as ET
 
-from .pipeline import element_to_snippet, parse_snippet
+from .pipeline import element_to_snippet, local_name, parse_snippet, structural_tokens
 
 
 Transport = Callable[..., dict[str, Any]]
 DEFAULT_REQUEST_TIMEOUT = 300.0
-DEFAULT_MAX_RETRIES = 1
+DEFAULT_MAX_RETRIES = 2
 DEFAULT_MAX_CONCURRENCY = 3
 MAX_CONCURRENCY_LIMIT = 8
 
@@ -105,6 +105,22 @@ def is_retryable_provider_error(error: Exception) -> bool:
     return status == 429 or 500 <= status <= 599
 
 
+def is_retryable_translation_output_error(error: Exception) -> bool:
+    message = str(error).lower()
+    retryable_fragments = (
+        "provider returned invalid jsonl",
+        "has validation issues",
+        "missing translated row",
+        "structural id/href/src tokens changed",
+        "invalid translated_html xml snippet",
+    )
+    return isinstance(error, ValueError) and any(fragment in message for fragment in retryable_fragments)
+
+
+def is_retryable_translation_error(error: Exception) -> bool:
+    return is_retryable_provider_error(error) or is_retryable_translation_output_error(error)
+
+
 def _is_official_openai_base_url(base_url: str) -> bool:
     value = base_url.lower().strip()
     return "api.openai.com" in value
@@ -168,6 +184,36 @@ def parse_translated_rows(text: str) -> list[dict]:
     except json.JSONDecodeError:
         pass
 
+    decoder = json.JSONDecoder()
+    cursor = 0
+    streamed_rows: list[dict] = []
+    while cursor < len(value):
+        while cursor < len(value) and value[cursor].isspace():
+            cursor += 1
+        if cursor >= len(value):
+            break
+        if value[cursor] not in "{[":
+            next_object = min(
+                [index for index in (value.find("{", cursor), value.find("[", cursor)) if index != -1],
+                default=-1,
+            )
+            if next_object == -1:
+                raise ValueError(f"provider returned invalid JSONL: preview={safe_preview(value)}")
+            cursor = next_object
+        try:
+            parsed, cursor = decoder.raw_decode(value, cursor)
+        except json.JSONDecodeError:
+            streamed_rows = []
+            break
+        if isinstance(parsed, list):
+            streamed_rows.extend(row for row in parsed if isinstance(row, dict))
+        elif isinstance(parsed, dict):
+            streamed_rows.append(parsed)
+        else:
+            raise ValueError(f"provider returned non-object JSON content: preview={safe_preview(value)}")
+    if streamed_rows:
+        return streamed_rows
+
     rows: list[dict] = []
     for line_number, line in enumerate(value.splitlines(), start=1):
         line = line.strip()
@@ -186,6 +232,79 @@ def parse_translated_rows(text: str) -> list[dict]:
     return rows
 
 
+def repair_translated_row_structure(source_html: str, translated_html: str) -> str:
+    try:
+        source = parse_snippet(source_html)
+        translated = parse_snippet(translated_html)
+    except ValueError:
+        return translated_html
+    desired_tokens = structural_tokens(source)
+    if not desired_tokens or structural_tokens(translated) == desired_tokens:
+        return translated_html
+
+    desired_counts: dict[tuple[str, str, str], int] = {}
+    for token in desired_tokens:
+        desired_counts[token] = desired_counts.get(token, 0) + 1
+
+    if source.attrib:
+        for attr in ("id", "href", "src"):
+            if attr in source.attrib and translated.attrib.get(attr) != source.attrib[attr]:
+                translated.attrib[attr] = source.attrib[attr]
+
+    def token_for(element: ET.Element) -> tuple[str, str, str] | None:
+        for attr in ("id", "href", "src"):
+            value = element.attrib.get(attr)
+            if value is not None:
+                return (local_name(element.tag), attr, value)
+        return None
+
+    def prune_extra_structural_children(parent: ET.Element) -> None:
+        for child in list(parent):
+            prune_extra_structural_children(child)
+            token = token_for(child)
+            if token is not None and token not in desired_counts:
+                parent.remove(child)
+
+    prune_extra_structural_children(translated)
+    present = structural_tokens(translated)
+    present_counts: dict[tuple[str, str, str], int] = {}
+    for token in present:
+        present_counts[token] = present_counts.get(token, 0) + 1
+
+    missing_elements: list[ET.Element] = []
+    for source_descendant in source.iter():
+        token = token_for(source_descendant)
+        if token is None:
+            continue
+        if present_counts.get(token, 0) >= desired_counts[token]:
+            continue
+        clone = ET.Element(local_name(source_descendant.tag), dict(source_descendant.attrib))
+        clone.text = ""
+        clone.tail = ""
+        missing_elements.append(clone)
+        present_counts[token] = present_counts.get(token, 0) + 1
+
+    for clone in reversed(missing_elements):
+        translated.insert(0, clone)
+    return element_to_snippet(translated)
+
+
+def repair_translated_rows_structure(batch_rows: list[dict], translated_rows: list[dict]) -> list[dict]:
+    source_by_id = {row.get("id"): row for row in batch_rows}
+    repaired: list[dict] = []
+    for row in translated_rows:
+        source = source_by_id.get(row.get("id"))
+        translated_html = row.get("translated_html")
+        if source is not None and isinstance(translated_html, str):
+            row = dict(row)
+            row["translated_html"] = repair_translated_row_structure(
+                str(source.get("source_html", "")),
+                translated_html,
+            )
+        repaired.append(row)
+    return repaired
+
+
 def batch_prompt(rows: list[dict], glossary: str, context: str, target_language: str) -> list[dict[str, str]]:
     compact_rows = [
         {
@@ -200,6 +319,9 @@ def batch_prompt(rows: list[dict], glossary: str, context: str, target_language:
         f"Target language: {target_language}. "
         "Return only JSONL rows with exactly `id` and `translated_html`. "
         "Do not add markdown, commentary, summaries, or placeholder text. "
+        "Do not prefix or suffix the JSONL with any non-JSON text. "
+        "Escape quotes and control characters so every line is valid JSON. "
+        "Return exactly one row for every input id, and never omit anchors. "
         "Preserve root tags, attributes, IDs, anchors, links, images, CSS classes, "
         "and inline emphasis tags. Translate only human-readable text."
     )

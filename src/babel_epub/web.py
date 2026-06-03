@@ -25,6 +25,7 @@ from .providers import (
 
 
 STATIC_DIR = Path(__file__).with_name("static")
+PROVIDER_SETTINGS_FILE = "provider_settings.json"
 FALLBACK_INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -66,6 +67,9 @@ class BabelWebHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/jobs":
             self._send_json({"jobs": [job.to_dict(include_paths=False) for job in self.engine.list_jobs()]})
+            return
+        if path == "/api/provider-settings":
+            self._send_json({"provider_settings": _public_provider_settings(_read_provider_settings(self.engine.data_dir))})
             return
         parts = [unquote(part) for part in path.strip("/").split("/")]
         if len(parts) == 3 and parts[:2] == ["api", "jobs"]:
@@ -165,32 +169,40 @@ class BabelWebHandler(BaseHTTPRequestHandler):
     def _start_job(self, job_id: str) -> None:
         try:
             data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8"))
+            stored_settings = _read_provider_settings(self.engine.data_dir)
+            merged_data = _merge_provider_settings(data, stored_settings)
             job = self.engine.start_job(
                 job_id,
                 ProviderSettings(
-                    provider=data.get("provider", "openai-compatible"),
-                    base_url=data.get("base_url", ""),
-                    api_key=data.get("api_key", ""),
-                    model=data.get("model", ""),
-                    target_language=data.get("target_language", "Simplified Chinese"),
-                    temperature=float(data.get("temperature", 0.2)),
+                    provider=merged_data.get("provider", "openai-compatible"),
+                    base_url=merged_data.get("base_url", ""),
+                    api_key=merged_data.get("api_key", ""),
+                    model=merged_data.get("model", ""),
+                    target_language=merged_data.get("target_language", "Simplified Chinese"),
+                    temperature=float(merged_data.get("temperature", 0.2)),
                     request_timeout=normalize_request_timeout(
-                        data.get("request_timeout", DEFAULT_REQUEST_TIMEOUT)
+                        merged_data.get("request_timeout", DEFAULT_REQUEST_TIMEOUT)
                     ),
-                    max_retries=normalize_max_retries(data.get("max_retries", DEFAULT_MAX_RETRIES)),
+                    max_retries=normalize_max_retries(merged_data.get("max_retries", DEFAULT_MAX_RETRIES)),
                     max_concurrency=normalize_max_concurrency(
-                        data.get("max_concurrency", DEFAULT_MAX_CONCURRENCY)
+                        merged_data.get("max_concurrency", DEFAULT_MAX_CONCURRENCY)
                     ),
                 ),
                 resume=data.get("resume") is True,
             )
+            _write_provider_settings(self.engine.data_dir, merged_data)
         except KeyError:
             self.send_error(HTTPStatus.NOT_FOUND, "job not found")
             return
         except (ValueError, json.JSONDecodeError) as exc:
             self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
-        self._send_json({"job": job.to_dict(include_paths=False)})
+        self._send_json(
+            {
+                "job": job.to_dict(include_paths=False),
+                "provider_settings": _public_provider_settings(_read_provider_settings(self.engine.data_dir)),
+            }
+        )
 
     def _download(self, job_id: str, artifact: str) -> None:
         try:
@@ -226,6 +238,75 @@ class BabelWebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
+
+
+def _provider_settings_path(data_dir: Path) -> Path:
+    return Path(data_dir) / PROVIDER_SETTINGS_FILE
+
+
+def _read_provider_settings(data_dir: Path) -> dict:
+    path = _provider_settings_path(data_dir)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_provider_settings(data_dir: Path, settings: dict) -> None:
+    provider = str(settings.get("provider", "openai-compatible"))
+    base_url = str(settings.get("base_url", ""))
+    model = str(settings.get("model", ""))
+    api_key = str(settings.get("api_key", ""))
+    if provider in {"fake", "dry-run", "dry_run"}:
+        api_key = ""
+    payload = {
+        "provider": provider,
+        "base_url": base_url,
+        "model": model,
+        "api_key": api_key,
+        "max_concurrency": normalize_max_concurrency(settings.get("max_concurrency", DEFAULT_MAX_CONCURRENCY)),
+        "request_timeout": normalize_request_timeout(settings.get("request_timeout", DEFAULT_REQUEST_TIMEOUT)),
+        "max_retries": normalize_max_retries(settings.get("max_retries", DEFAULT_MAX_RETRIES)),
+    }
+    path = _provider_settings_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _public_provider_settings(settings: dict) -> dict:
+    return {
+        "provider": settings.get("provider", "openai-compatible"),
+        "base_url": settings.get("base_url", ""),
+        "model": settings.get("model", ""),
+        "has_api_key": bool(settings.get("api_key")),
+        "max_concurrency": normalize_max_concurrency(settings.get("max_concurrency", DEFAULT_MAX_CONCURRENCY)),
+        "request_timeout": normalize_request_timeout(settings.get("request_timeout", DEFAULT_REQUEST_TIMEOUT)),
+        "max_retries": normalize_max_retries(settings.get("max_retries", DEFAULT_MAX_RETRIES)),
+    }
+
+
+def _merge_provider_settings(data: dict, stored: dict) -> dict:
+    merged = dict(data)
+    provider = str(merged.get("provider") or stored.get("provider") or "openai-compatible")
+    base_url = str(merged.get("base_url") or stored.get("base_url") or "")
+    stored_provider = str(stored.get("provider") or "")
+    stored_base_url = str(stored.get("base_url") or "")
+    same_secret_scope = provider == stored_provider and base_url == stored_base_url
+    if not str(merged.get("api_key") or "").strip() and same_secret_scope:
+        merged["api_key"] = stored.get("api_key", "")
+    for key in ("provider", "base_url", "model", "max_concurrency", "request_timeout", "max_retries"):
+        if merged.get(key) in (None, "") and stored.get(key) not in (None, ""):
+            merged[key] = stored[key]
+    merged["provider"] = provider
+    merged["base_url"] = base_url
+    return merged
 
 
 def _resolve_static_path(request_path: str) -> Path | None:

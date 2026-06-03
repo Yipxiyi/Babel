@@ -78,6 +78,23 @@ type JobsResponse = {
   jobs: BabelJob[];
 };
 
+type ProviderSettingsResponse = {
+  provider_settings: {
+    provider?: string;
+    base_url?: string;
+    model?: string;
+    has_api_key?: boolean;
+    max_concurrency?: number;
+    request_timeout?: number;
+    max_retries?: number;
+  };
+};
+
+type StartJobResponse = {
+  job: BabelJob;
+  provider_settings?: ProviderSettingsResponse["provider_settings"];
+};
+
 type FormState = {
   target_language: string;
   title: string;
@@ -161,6 +178,7 @@ const dictionaries = {
     concurrency: "Concurrency",
     requestTimeout: "Request timeout",
     retries: "Retries",
+    savedApiKey: "Saved API key available. Leave blank to reuse it.",
     start: "Start Translation",
     resume: "Resume Translation",
     providerHint:
@@ -274,6 +292,7 @@ const dictionaries = {
     concurrency: "并发数",
     requestTimeout: "请求超时",
     retries: "重试次数",
+    savedApiKey: "已保存 API Key，可留空复用。",
     start: "开始翻译",
     resume: "继续翻译",
     providerHint: "密钥只发送到本地服务进程。若要公网部署，必须先增加认证保护。",
@@ -479,6 +498,7 @@ function App() {
   const [isPreparing, setIsPreparing] = useState(false);
   const [isSavingGlossary, setIsSavingGlossary] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
+  const [hasSavedApiKey, setHasSavedApiKey] = useState(false);
   const [form, setForm] = useState<FormState>({
     target_language: "Simplified Chinese",
     title: "",
@@ -492,7 +512,7 @@ function App() {
     model: "gpt-4.1",
     max_concurrency: "3",
     request_timeout: "300",
-    max_retries: "1",
+    max_retries: "2",
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const jobProgressRef = useRef<HTMLElement>(null);
@@ -506,6 +526,7 @@ function App() {
   }, [locale]);
 
   useEffect(() => {
+    void loadProviderSettings();
     void loadLatestJob();
   }, []);
 
@@ -536,6 +557,26 @@ function App() {
       await loadJob(latest.job_id, false);
     } catch (error) {
       setNotice({ kind: "error", text: normalizeError(error) });
+    }
+  }
+
+  async function loadProviderSettings() {
+    try {
+      const data = await fetchJson<ProviderSettingsResponse>("/api/provider-settings");
+      const settings = data.provider_settings;
+      setHasSavedApiKey(Boolean(settings.has_api_key));
+      setProvider((previous) => ({
+        ...previous,
+        provider: settings.provider || previous.provider,
+        base_url: settings.base_url || previous.base_url,
+        model: settings.model || previous.model,
+        api_key: "",
+        max_concurrency: String(settings.max_concurrency ?? previous.max_concurrency),
+        request_timeout: String(settings.request_timeout ?? previous.request_timeout),
+        max_retries: String(settings.max_retries ?? previous.max_retries),
+      }));
+    } catch {
+      setHasSavedApiKey(false);
     }
   }
 
@@ -609,8 +650,8 @@ function App() {
     try {
       const maxConcurrency = integerOption(provider.max_concurrency, 3, 1);
       const requestTimeout = integerOption(provider.request_timeout, 300, 1);
-      const maxRetries = integerOption(provider.max_retries, 1, 0);
-      const data = await fetchJson<{ job: BabelJob }>(`/api/jobs/${currentJobId}/start`, {
+      const maxRetries = integerOption(provider.max_retries, 2, 0);
+      const data = await fetchJson<StartJobResponse>(`/api/jobs/${currentJobId}/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -623,6 +664,10 @@ function App() {
         }),
       });
       setJob(data.job);
+      if (data.provider_settings) {
+        setHasSavedApiKey(Boolean(data.provider_settings.has_api_key));
+        setProvider((previous) => ({ ...previous, api_key: "" }));
+      }
       window.setTimeout(() => {
         void loadJob(currentJobId, false);
       }, 700);
@@ -693,6 +738,7 @@ function App() {
           <ProviderPanel
             t={t}
             provider={provider}
+            hasSavedApiKey={hasSavedApiKey}
             canStart={canStart}
             isStarting={isStarting}
             onUpdateProvider={updateProvider}
@@ -794,7 +840,7 @@ function AppHeader({
             <span className="rounded-full border border-clay/40 bg-clay/10 px-3 py-1 font-mono uppercase tracking-[0.18em] text-clay">
               {t.statusBadge}
             </span>
-            <span>v0.6.0</span>
+            <span>v0.7.0</span>
           </div>
         </div>
       </div>
@@ -937,6 +983,7 @@ function UploadPanel({
 function ProviderPanel({
   t,
   provider,
+  hasSavedApiKey,
   canStart,
   isStarting,
   onUpdateProvider,
@@ -944,6 +991,7 @@ function ProviderPanel({
 }: {
   t: (typeof dictionaries)[Locale];
   provider: ProviderState;
+  hasSavedApiKey: boolean;
   canStart: boolean;
   isStarting: boolean;
   onUpdateProvider: <K extends keyof ProviderState>(key: K, value: ProviderState[K]) => void;
@@ -963,7 +1011,7 @@ function ProviderPanel({
         <Field label={t.baseUrl}>
           <Input value={provider.base_url} onChange={(event) => onUpdateProvider("base_url", event.target.value)} />
         </Field>
-        <Field label={t.apiKey}>
+        <Field label={t.apiKey} helper={hasSavedApiKey ? t.savedApiKey : undefined}>
           <div className="relative">
             <Input
               className="pr-10"

@@ -9,7 +9,12 @@ import unittest
 from pathlib import Path
 
 from babel_epub.jobs import BabelJobEngine, JobRequest, ProviderSettings
-from babel_epub.providers import FakeProvider, OpenAICompatibleProvider, parse_translated_rows
+from babel_epub.providers import (
+    FakeProvider,
+    OpenAICompatibleProvider,
+    parse_translated_rows,
+    repair_translated_row_structure,
+)
 from test_pipeline import make_minimal_epub
 
 
@@ -112,6 +117,7 @@ class JobEngineTests(unittest.TestCase):
                     model="fake-model",
                     target_language="Simplified Chinese",
                     max_concurrency=1,
+                    max_retries=0,
                 ),
             )
 
@@ -175,6 +181,44 @@ class JobEngineTests(unittest.TestCase):
             input_epub = tmp_path / "input.epub"
             make_minimal_epub(input_epub)
             engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: TimeoutOnceProvider())
+            job = engine.create_job(
+                JobRequest(
+                    filename="input.epub",
+                    content=input_epub.read_bytes(),
+                    target_language="Simplified Chinese",
+                )
+            )
+
+            finished = engine.run_job(
+                job.job_id,
+                ProviderSettings(
+                    provider="fake",
+                    model="fake-model",
+                    target_language="Simplified Chinese",
+                    max_concurrency=1,
+                    max_retries=1,
+                ),
+            )
+
+            self.assertEqual(finished.status, "completed")
+            self.assertIn("batch-retry", [event["type"] for event in finished.events])
+
+    def test_validation_failure_is_retried_and_can_complete(self) -> None:
+        class MissingRowOnceProvider(FakeProvider):
+            calls = 0
+
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                type(self).calls += 1
+                translated = super().translate_batch(rows, glossary, context)
+                if type(self).calls == 1:
+                    return translated[:1]
+                return translated
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: MissingRowOnceProvider())
             job = engine.create_job(
                 JobRequest(
                     filename="input.epub",
@@ -324,6 +368,7 @@ class JobEngineTests(unittest.TestCase):
                     model="fake-model",
                     target_language="Simplified Chinese",
                     max_concurrency=1,
+                    max_retries=0,
                 ),
             )
             self.assertEqual(failed.status, "failed")
@@ -374,6 +419,53 @@ class JobEngineTests(unittest.TestCase):
             self.assertEqual(loaded.failed_batches, [])
             self.assertTrue(loaded.events)
 
+    def test_running_job_json_is_marked_failed_on_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: FakeProvider())
+            job = engine.create_job(
+                JobRequest(
+                    filename="input.epub",
+                    content=input_epub.read_bytes(),
+                    target_language="Simplified Chinese",
+                )
+            )
+            state_path = job.work_dir / "job.json"
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            data["status"] = "running"
+            data["message"] = "Translating batches."
+            data["active_batches"] = [{"batch": 1}]
+            state_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+            reloaded = BabelJobEngine(tmp_path / "jobs")
+            loaded = reloaded.get_job(job.job_id)
+
+            self.assertEqual(loaded.status, "failed")
+            self.assertFalse(loaded.active_batches)
+            self.assertIn("Interrupted before completion", loaded.message)
+            self.assertIn("failed", [event["type"] for event in loaded.events])
+
+    def test_list_jobs_returns_most_recent_activity_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: FakeProvider())
+            first = engine.create_job(
+                JobRequest(filename="first.epub", content=input_epub.read_bytes(), target_language="Simplified Chinese")
+            )
+            second = engine.create_job(
+                JobRequest(filename="second.epub", content=input_epub.read_bytes(), target_language="Simplified Chinese")
+            )
+            engine._mutate_job(first.job_id, lambda job: setattr(job, "last_active_at", "2026-01-01T00:00:00Z"))
+            engine._mutate_job(second.job_id, lambda job: setattr(job, "last_active_at", "2026-01-02T00:00:00Z"))
+
+            jobs = engine.list_jobs()
+
+            self.assertEqual(jobs[0].job_id, second.job_id)
+
     def test_openai_compatible_provider_builds_messages_and_parses_jsonl(self) -> None:
         captured = {}
 
@@ -412,6 +504,29 @@ class JobEngineTests(unittest.TestCase):
     def test_invalid_provider_jsonl_reports_safe_preview(self) -> None:
         with self.assertRaisesRegex(ValueError, "preview=not json"):
             parse_translated_rows("not json\nsecond line")
+
+    def test_provider_parser_accepts_concatenated_json_objects(self) -> None:
+        rows = parse_translated_rows(
+            '{"id":"a::0001","translated_html":"<p>你好</p>"} '
+            '{"id":"a::0002","translated_html":"<p>世界</p>"}'
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                {"id": "a::0001", "translated_html": "<p>你好</p>"},
+                {"id": "a::0002", "translated_html": "<p>世界</p>"},
+            ],
+        )
+
+    def test_repair_translated_row_structure_restores_missing_anchor(self) -> None:
+        repaired = repair_translated_row_structure(
+            '<p class="indent">Before <a id="page12" class="calibre6" />after.</p>',
+            '<p class="indent">之前之后。</p>',
+        )
+
+        self.assertIn('id="page12"', repaired)
+        self.assertIn('class="calibre6"', repaired)
 
 
 if __name__ == "__main__":

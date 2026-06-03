@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
 
-from babel_epub.web import _parse_multipart_form, _resolve_static_path, render_index_html
+from babel_epub.web import (
+    _merge_provider_settings,
+    _parse_multipart_form,
+    _public_provider_settings,
+    _read_provider_settings,
+    _resolve_static_path,
+    _write_provider_settings,
+    render_index_html,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +34,8 @@ class WebTests(unittest.TestCase):
         self.assertIn("Concurrency", app_source)
         self.assertIn("Request timeout", app_source)
         self.assertIn("Retries", app_source)
+        self.assertIn("Saved API key available", app_source)
+        self.assertIn("/api/provider-settings", app_source)
         self.assertIn("Glossary", app_source)
         self.assertIn("Job Progress", app_source)
         self.assertIn("max_concurrency", app_source)
@@ -70,6 +81,39 @@ class WebTests(unittest.TestCase):
         self.assertEqual(form["epub"].filename, "book.epub")
         self.assertEqual(form["epub"].content, b"PK\x03\x04binary payload \x00 ")
         self.assertEqual(form["target_language"].value, "Simplified Chinese")
+
+    def test_provider_settings_persist_without_public_key_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            _write_provider_settings(
+                data_dir,
+                {
+                    "provider": "openai-compatible",
+                    "base_url": "https://api.openai.com/v1",
+                    "model": "gpt-4.1",
+                    "api_key": "sk-secret",
+                    "max_concurrency": 3,
+                    "request_timeout": 300,
+                    "max_retries": 1,
+                },
+            )
+
+            stored = _read_provider_settings(data_dir)
+            public = _public_provider_settings(stored)
+            merged = _merge_provider_settings(
+                {
+                    "provider": "openai-compatible",
+                    "base_url": "https://api.openai.com/v1",
+                    "model": "gpt-4.1",
+                    "api_key": "",
+                },
+                stored,
+            )
+
+            self.assertEqual(stored["api_key"], "sk-secret")
+            self.assertTrue(public["has_api_key"])
+            self.assertNotIn("api_key", public)
+            self.assertEqual(merged["api_key"], "sk-secret")
 
 
 if __name__ == "__main__":

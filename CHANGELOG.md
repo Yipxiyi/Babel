@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.0 - 2026-06-03
+
+### Added
+
+- Local provider settings persistence with `has_api_key`-only public API responses, allowing self-hosted users to leave the API key field blank after the first successful configuration.
+- Structural repair for translated rows that restores missing `id`, `href`, and `src` XHTML tokens before strict validation.
+- Restart recovery that marks interrupted `running` jobs as failed/resumable instead of leaving stale active progress.
+
+### Changed
+
+- Default batch size reduced to 20 text blocks to improve long-form provider reliability.
+- Default provider retry count increased to 2.
+- Provider prompts now explicitly require valid JSONL, exact row coverage, and preserved anchors.
+- Latest job ordering now uses `last_active_at` so refresh binds to the most recent task.
+
 ## 0.6.0 - 2026-06-03
 
 ### Added
