@@ -12,6 +12,7 @@ from babel_epub.jobs import BabelJobEngine, JobRequest, ProviderSettings
 from babel_epub.providers import (
     FakeProvider,
     OpenAICompatibleProvider,
+    TranslationProvider,
     parse_translated_rows,
     repair_translated_row_structure,
 )
@@ -44,6 +45,115 @@ def make_epub_with_paragraphs(path: Path, paragraph_count: int) -> None:
 
 
 class JobEngineTests(unittest.TestCase):
+    def test_autofill_glossary_terms_only_fills_pending_empty_terms(self) -> None:
+        class GlossaryDraftProvider(TranslationProvider):
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                return [
+                    {"id": row["id"], "translated_html": f"<p>译:{row['source_text']}</p>"}
+                    for row in rows
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: GlossaryDraftProvider())
+            job = engine.create_job(
+                JobRequest(filename="input.epub", content=input_epub.read_bytes(), target_language="Simplified Chinese")
+            )
+            engine.update_glossary_terms(
+                job.job_id,
+                [
+                    {
+                        "source": "Rook",
+                        "translation": "",
+                        "type": "person",
+                        "aliases": [],
+                        "frequency": 7,
+                        "evidence": ["Rook opened the door."],
+                        "status": "pending",
+                        "confidence": 0.62,
+                        "locked": False,
+                    },
+                    {
+                        "source": "Deepwoods",
+                        "translation": "深林",
+                        "type": "place",
+                        "aliases": [],
+                        "frequency": 4,
+                        "evidence": [],
+                        "status": "pending",
+                        "confidence": 0.72,
+                        "locked": False,
+                    },
+                    {
+                        "source": "Twig",
+                        "translation": "",
+                        "type": "person",
+                        "aliases": [],
+                        "frequency": 3,
+                        "evidence": [],
+                        "status": "approved",
+                        "confidence": 0.9,
+                        "locked": True,
+                    },
+                    {
+                        "source": "Mud",
+                        "translation": "",
+                        "type": "special",
+                        "aliases": [],
+                        "frequency": 2,
+                        "evidence": [],
+                        "status": "ignored",
+                        "confidence": 0.2,
+                        "locked": False,
+                    },
+                ],
+            )
+
+            updated = engine.autofill_glossary_terms(
+                job.job_id,
+                ProviderSettings(provider="fake", model="fake-model", target_language="Simplified Chinese"),
+            )
+            terms = {term["source"]: term for term in engine.read_glossary_terms(job.job_id)}
+            markdown = updated.glossary_path.read_text(encoding="utf-8")
+
+            self.assertEqual(terms["Rook"]["translation"], "译:Rook")
+            self.assertEqual(terms["Rook"]["status"], "pending")
+            self.assertFalse(terms["Rook"]["locked"])
+            self.assertEqual(terms["Deepwoods"]["translation"], "深林")
+            self.assertEqual(terms["Twig"]["translation"], "")
+            self.assertEqual(terms["Mud"]["translation"], "")
+            self.assertEqual(updated.glossary_summary["pending"], 2)
+            self.assertIn("Rook -> 译:Rook", markdown)
+            self.assertIn("glossary-autofill", [event["type"] for event in updated.events])
+
+    def test_autofill_provider_settings_error_does_not_fail_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: FakeProvider())
+            job = engine.create_job(
+                JobRequest(filename="input.epub", content=input_epub.read_bytes(), target_language="Simplified Chinese")
+            )
+
+            with self.assertRaisesRegex(ValueError, "api_key is required"):
+                engine.autofill_glossary_terms(
+                    job.job_id,
+                    ProviderSettings(
+                        provider="openai-compatible",
+                        base_url="https://api.openai.com/v1",
+                        api_key="",
+                        model="gpt-4.1",
+                        target_language="Simplified Chinese",
+                    ),
+                )
+
+            current = engine.get_job(job.job_id)
+            self.assertEqual(current.status, "prepared")
+            self.assertNotIn("failed", [event["type"] for event in current.events])
+
     def test_job_engine_runs_full_translation_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

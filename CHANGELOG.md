@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Web/API glossary autofill action that drafts missing pending term translations with the configured provider while preserving human-approved, edited, and ignored glossary rows.
+
+### Changed
+
+- Web glossary review now defaults to a compact readiness summary and opens the full editable table in a modal.
+- Starting translation with pending or empty glossary draft terms now shows a soft confirmation instead of silently proceeding.
+
 ## 0.7.0 - 2026-06-03
 
 ### Added

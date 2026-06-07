@@ -210,6 +210,15 @@ const dictionaries = {
     saveGlossary: "Save glossary table",
     addTerm: "Add term",
     noTerms: "Prepare a job to review glossary candidates.",
+    reviewGlossary: "Review Glossary",
+    aiFillTranslations: "AI Fill Translations",
+    aiFillingTranslations: "AI filling...",
+    glossarySummaryTitle: "Glossary readiness",
+    glossarySummaryHint: "AI drafts fill blank pending translations first; approve the terms you want locked before translation.",
+    approved: "Approved",
+    pending: "Pending",
+    emptyDrafts: "Empty drafts",
+    ignored: "Ignored",
     showing: "Showing",
     of: "of",
     page: "Page",
@@ -252,9 +261,15 @@ const dictionaries = {
     refreshJob: "Refresh Job",
     noticePrepared: "Workspace prepared. Review the glossary table before starting.",
     noticeGlossary: "Glossary table saved.",
+    noticeAutofillNeedsProvider: "Workspace prepared. Configure a provider, then use AI Fill Translations to draft glossary names.",
+    noticeAutofillFilling: "Drafting glossary translations...",
+    noticeAutofillDone: "AI filled glossary draft translations.",
+    noticeAutofillNone: "No empty pending glossary terms needed AI draft translations.",
     noticeStarted: "Translation started.",
     noticeResume: "Resume requested.",
     noticeSettings: "Settings saved.",
+    startPendingTitle: "Start with pending glossary terms?",
+    startPendingBody: "Some glossary terms are still pending or missing draft translations. You can continue, but terminology may be less consistent.",
     openProvider: "OpenAI Compatible",
     anthropic: "Anthropic Claude",
     fake: "Fake Dry Run",
@@ -282,8 +297,8 @@ const dictionaries = {
     viewCurrentJob: "View current job",
     guideSteps: [
       ["Upload", "Choose an ebook, target language, metadata language, and output format."],
-      ["Prepare", "Generate a private workspace, batch manifest, and structured glossary."],
-      ["Review glossary", "Lock names, places, titles, nicknames, species, and recurring terms."],
+      ["Prepare", "Generate a private workspace, batch manifest, and structured glossary, then draft missing term translations with AI when a provider is configured."],
+      ["Review glossary", "Open the glossary modal, review AI drafts, then approve names, places, titles, nicknames, species, and recurring terms."],
       ["Configure settings", "Open Settings for provider, model, concurrency, AI QA, and title automation."],
       ["Start or resume", "Start translation, or resume a failed job from valid translated batches."],
       ["Monitor and download", "Watch progress, expand the terminal if needed, then download artifacts."],
@@ -331,6 +346,15 @@ const dictionaries = {
     saveGlossary: "保存术语表",
     addTerm: "新增术语",
     noTerms: "准备任务后可审查术语候选项。",
+    reviewGlossary: "审查术语表",
+    aiFillTranslations: "AI 补全译名",
+    aiFillingTranslations: "AI 补全中...",
+    glossarySummaryTitle: "术语表就绪状态",
+    glossarySummaryHint: "AI 会先补齐 pending 空译名；真正需要全书一致的术语，请审查后设为 approved。",
+    approved: "已确认",
+    pending: "待审",
+    emptyDrafts: "空草稿",
+    ignored: "已忽略",
     showing: "显示",
     of: "共",
     page: "第",
@@ -373,9 +397,15 @@ const dictionaries = {
     refreshJob: "刷新任务",
     noticePrepared: "工作区已准备。开始前请先审查术语表。",
     noticeGlossary: "术语表已保存。",
+    noticeAutofillNeedsProvider: "工作区已准备。请先配置 provider，然后用 AI 补全译名生成术语草稿。",
+    noticeAutofillFilling: "正在生成术语译名草稿...",
+    noticeAutofillDone: "AI 已补全术语译名草稿。",
+    noticeAutofillNone: "没有需要 AI 补全的 pending 空译名。",
     noticeStarted: "翻译已开始。",
     noticeResume: "已请求继续翻译。",
     noticeSettings: "设置已保存。",
+    startPendingTitle: "术语表未完全审完，仍然开始翻译？",
+    startPendingBody: "还有 pending 或空译名术语。可以继续，但全书术语一致性风险会更高。",
     openProvider: "OpenAI Compatible",
     anthropic: "Anthropic Claude",
     fake: "Fake Dry Run",
@@ -403,8 +433,8 @@ const dictionaries = {
     viewCurrentJob: "查看当前任务",
     guideSteps: [
       ["Upload", "选择电子书、目标语言、元数据语言和输出格式。"],
-      ["Prepare", "生成私有工作区、批次清单和结构化术语表。"],
-      ["Review glossary", "锁定人物名、地名、称呼、昵称、物种和高频术语。"],
+      ["Prepare", "生成私有工作区、批次清单和结构化术语表；provider 已配置时自动生成缺失译名草稿。"],
+      ["Review glossary", "打开术语表弹窗，审查 AI 草稿，再锁定人物名、地名、称呼、昵称、物种和高频术语。"],
       ["Configure settings", "在设置中填写 provider、model、并发、AI QA 和标题自动化。"],
       ["Start or resume", "开始翻译；失败后从有效批次继续。"],
       ["Monitor and download", "查看进度，必要时展开终端，完成后下载产物。"],
@@ -423,11 +453,13 @@ function App() {
   const [notice, setNotice] = useState<Notice>(null);
   const [guideOpen, setGuideOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [glossaryOpen, setGlossaryOpen] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [isPreparing, setIsPreparing] = useState(false);
+  const [isAutofillingGlossary, setIsAutofillingGlossary] = useState(false);
   const [isSavingGlossary, setIsSavingGlossary] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
@@ -455,6 +487,7 @@ function App() {
   const jobProgressRef = useRef<HTMLElement>(null);
   const guideReturnRef = useRef<HTMLElement | null>(null);
   const settingsReturnRef = useRef<HTMLElement | null>(null);
+  const glossaryReturnRef = useRef<HTMLElement | null>(null);
   const t = dictionaries[locale];
 
   useEffect(() => {
@@ -577,6 +610,7 @@ function App() {
       setForm((previous) => ({ ...previous, title: data.job.title || previous.title }));
       await loadGlossaryTerms(data.job.job_id);
       setNotice({ kind: "success", text: t.noticePrepared });
+      void handleAutofillGlossary(data.job.job_id, true);
     } catch (error) {
       setNotice({ kind: "error", text: normalizeError(error) });
     } finally {
@@ -608,6 +642,40 @@ function App() {
     }
   }
 
+  async function handleAutofillGlossary(jobId = currentJobId, automatic = false) {
+    if (!jobId) {
+      return;
+    }
+    if (!canUseProvider(provider, hasSavedApiKey)) {
+      setNotice({ kind: "info", text: t.noticeAutofillNeedsProvider });
+      return;
+    }
+    setIsAutofillingGlossary(true);
+    if (!automatic) {
+      setNotice({ kind: "info", text: t.noticeAutofillFilling });
+    }
+    try {
+      const data = await fetchJson<{ job: BabelJob; glossary_terms: GlossaryTerm[]; filled: number }>(
+        `/api/jobs/${jobId}/glossary-terms/autofill`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...settingsPayload(),
+            target_language: form.target_language,
+          }),
+        },
+      );
+      setJob(data.job);
+      setTerms(data.glossary_terms || []);
+      setNotice({ kind: "success", text: data.filled > 0 ? t.noticeAutofillDone : t.noticeAutofillNone });
+    } catch (error) {
+      setNotice({ kind: "error", text: normalizeError(error) });
+    } finally {
+      setIsAutofillingGlossary(false);
+    }
+  }
+
   async function handleSaveSettings() {
     setIsSavingSettings(true);
     try {
@@ -635,6 +703,15 @@ function App() {
   async function handleStart(resume: boolean) {
     if (!currentJobId) {
       return;
+    }
+    if (!resume && hasGlossaryWarnings(terms)) {
+      const stats = glossaryStats(terms);
+      const confirmed = window.confirm(
+        `${t.startPendingTitle}\n\n${t.startPendingBody}\n\n${t.pending}: ${stats.pending} · ${t.emptyDrafts}: ${stats.empty}`,
+      );
+      if (!confirmed) {
+        return;
+      }
     }
     setIsStarting(true);
     setNotice({ kind: "info", text: resume ? t.noticeResume : t.noticeStarted });
@@ -730,12 +807,23 @@ function App() {
     window.setTimeout(() => settingsReturnRef.current?.focus(), 0);
   }
 
+  function openGlossaryDialog() {
+    glossaryReturnRef.current = document.activeElement as HTMLElement | null;
+    setGlossaryOpen(true);
+  }
+
+  function closeGlossaryDialog() {
+    setGlossaryOpen(false);
+    window.setTimeout(() => glossaryReturnRef.current?.focus(), 0);
+  }
+
   const tone = statusTone(job?.status);
   const percent = progressPercent(job);
   const canStart = Boolean(currentJobId) && job?.status !== "running";
   const canResume = Boolean(currentJobId) && job?.status === "failed";
   const canDownloadOutput = job?.status === "completed";
   const canDownloadGlossary = Boolean(currentJobId);
+  const canAutofillGlossary = Boolean(currentJobId) && canUseProvider(provider, hasSavedApiKey);
   const terminalEvents: JobEvent[] = job?.events?.length ? job.events : [{ type: "idle", message: t.terminalIdle }];
   const titleMode = provider.auto_title_enabled && canUseProvider(provider, hasSavedApiKey) ? t.generatedTitle : t.suffixTitle;
 
@@ -769,20 +857,14 @@ function App() {
 
         <div className="space-y-6">
           <Panel title={t.glossaryHeading}>
-            <GlossaryTable
+            <GlossarySummary
               t={t}
               terms={terms}
-              search={search}
-              typeFilter={typeFilter}
-              statusFilter={statusFilter}
-              canSave={Boolean(currentJobId)}
-              isSaving={isSavingGlossary}
-              onSearch={setSearch}
-              onTypeFilter={setTypeFilter}
-              onStatusFilter={setStatusFilter}
-              onUpdateTerm={updateTerm}
-              onAddTerm={addTerm}
-              onSave={() => void handleSaveGlossary()}
+              canReview={Boolean(currentJobId)}
+              canAutofill={canAutofillGlossary}
+              isAutofilling={isAutofillingGlossary}
+              onReview={openGlossaryDialog}
+              onAutofill={() => void handleAutofillGlossary()}
             />
           </Panel>
           <Panel title={t.jobProgress} ref={jobProgressRef}>
@@ -846,6 +928,24 @@ function App() {
           onClose={closeSettingsDialog}
           onUpdateProvider={updateProvider}
           onSave={() => void handleSaveSettings()}
+        />
+      ) : null}
+      {glossaryOpen ? (
+        <GlossaryModal
+          t={t}
+          terms={terms}
+          search={search}
+          typeFilter={typeFilter}
+          statusFilter={statusFilter}
+          canSave={Boolean(currentJobId)}
+          isSaving={isSavingGlossary}
+          onClose={closeGlossaryDialog}
+          onSearch={setSearch}
+          onTypeFilter={setTypeFilter}
+          onStatusFilter={setStatusFilter}
+          onUpdateTerm={updateTerm}
+          onAddTerm={addTerm}
+          onSave={() => void handleSaveGlossary()}
         />
       ) : null}
     </div>
@@ -1021,6 +1121,115 @@ function LanguageCombobox({ label, helper, value, mode, onChange }: { label: str
         ))}
       </datalist>
     </Field>
+  );
+}
+
+function GlossarySummary({
+  t,
+  terms,
+  canReview,
+  canAutofill,
+  isAutofilling,
+  onReview,
+  onAutofill,
+}: {
+  t: (typeof dictionaries)[Locale];
+  terms: GlossaryTerm[];
+  canReview: boolean;
+  canAutofill: boolean;
+  isAutofilling: boolean;
+  onReview: () => void;
+  onAutofill: () => void;
+}) {
+  const stats = glossaryStats(terms);
+  return (
+    <div>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h3 className="flex items-center gap-2 text-lg font-bold tracking-tight">
+            <Table size={20} weight="bold" />
+            {t.glossarySummaryTitle}
+          </h3>
+          <p className="mt-1 max-w-[62ch] text-sm leading-relaxed text-muted">{t.glossarySummaryHint}</p>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <Button type="button" variant="ghost" disabled={!canReview} onClick={onReview}>
+            <Table size={18} weight="bold" />
+            {t.reviewGlossary}
+          </Button>
+          <Button type="button" variant="secondary" disabled={!canAutofill || isAutofilling} onClick={onAutofill}>
+            <ArrowClockwise size={18} weight="bold" />
+            {isAutofilling ? t.aiFillingTranslations : t.aiFillTranslations}
+          </Button>
+        </div>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-5">
+        <Metric label="Total" value={String(stats.total)} />
+        <Metric label={t.approved} value={String(stats.approved)} />
+        <Metric label={t.pending} value={String(stats.pending)} />
+        <Metric label={t.emptyDrafts} value={String(stats.empty)} />
+        <Metric label={t.ignored} value={String(stats.ignored)} />
+      </div>
+    </div>
+  );
+}
+
+function GlossaryModal({
+  t,
+  terms,
+  search,
+  typeFilter,
+  statusFilter,
+  canSave,
+  isSaving,
+  onClose,
+  onSearch,
+  onTypeFilter,
+  onStatusFilter,
+  onUpdateTerm,
+  onAddTerm,
+  onSave,
+}: {
+  t: (typeof dictionaries)[Locale];
+  terms: GlossaryTerm[];
+  search: string;
+  typeFilter: string;
+  statusFilter: string;
+  canSave: boolean;
+  isSaving: boolean;
+  onClose: () => void;
+  onSearch: (value: string) => void;
+  onTypeFilter: (value: string) => void;
+  onStatusFilter: (value: string) => void;
+  onUpdateTerm: (index: number, patch: Partial<GlossaryTerm>) => void;
+  onAddTerm: () => void;
+  onSave: () => void;
+}) {
+  const closeRef = useRef<HTMLButtonElement>(null);
+  useModalBehavior(onClose, closeRef);
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-ink/45 px-4 py-6 backdrop-blur-sm" onMouseDown={onClose}>
+      <div role="dialog" aria-modal="true" aria-labelledby="glossary-title" className="max-h-[88dvh] w-full max-w-6xl overflow-y-auto rounded-2xl border border-ink/15 bg-paper p-5 shadow-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <ModalHeader id="glossary-title" title={t.glossaryTitle} subtitle={t.glossaryHint} closeLabel={t.close} closeRef={closeRef} onClose={onClose} />
+        <div className="mt-5">
+          <GlossaryTable
+            t={t}
+            terms={terms}
+            search={search}
+            typeFilter={typeFilter}
+            statusFilter={statusFilter}
+            canSave={canSave}
+            isSaving={isSaving}
+            onSearch={onSearch}
+            onTypeFilter={onTypeFilter}
+            onStatusFilter={onStatusFilter}
+            onUpdateTerm={onUpdateTerm}
+            onAddTerm={onAddTerm}
+            onSave={onSave}
+          />
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1541,6 +1750,33 @@ function Button({ variant = "primary", className, children, ...props }: React.Bu
       {children}
     </button>
   );
+}
+
+function glossaryStats(terms: GlossaryTerm[]) {
+  return terms.reduce(
+    (stats, term) => {
+      const status = term.status || "pending";
+      const translation = term.translation.trim();
+      stats.total += 1;
+      if (status === "ignored") {
+        stats.ignored += 1;
+      } else if (status === "approved" || term.locked) {
+        stats.approved += 1;
+      } else if (status === "pending") {
+        stats.pending += 1;
+        if (!translation) {
+          stats.empty += 1;
+        }
+      }
+      return stats;
+    },
+    { total: 0, approved: 0, pending: 0, empty: 0, ignored: 0 },
+  );
+}
+
+function hasGlossaryWarnings(terms: GlossaryTerm[]): boolean {
+  const stats = glossaryStats(terms);
+  return stats.pending > 0 || stats.empty > 0;
 }
 
 function canUseProvider(provider: ProviderSettings, hasSavedApiKey: boolean): boolean {

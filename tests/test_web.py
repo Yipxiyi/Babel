@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
 import unittest
 import tempfile
+from io import BytesIO
 from pathlib import Path
 
+from babel_epub.jobs import BabelJobEngine, JobRequest
+from babel_epub.providers import TranslationProvider
 from babel_epub.web import (
+    BabelWebHandler,
     _merge_provider_settings,
     _package_version,
     _parse_multipart_form,
@@ -14,12 +19,85 @@ from babel_epub.web import (
     _write_provider_settings,
     render_index_html,
 )
+from test_pipeline import make_minimal_epub
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class WebTests(unittest.TestCase):
+    def test_autofill_endpoint_reuses_saved_provider_key(self) -> None:
+        class CapturingProvider(TranslationProvider):
+            api_key = ""
+
+            def __init__(self, api_key: str) -> None:
+                type(self).api_key = api_key
+
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                return [
+                    {"id": row["id"], "translated_html": f"<p>译:{row['source_text']}</p>"}
+                    for row in rows
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "jobs"
+            input_epub = Path(tmp) / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(
+                data_dir,
+                provider_factory=lambda settings: CapturingProvider(settings.api_key),
+            )
+            job = engine.create_job(
+                JobRequest(filename="input.epub", content=input_epub.read_bytes(), target_language="Simplified Chinese")
+            )
+            engine.update_glossary_terms(
+                job.job_id,
+                [
+                    {
+                        "source": "Rook",
+                        "translation": "",
+                        "type": "person",
+                        "aliases": [],
+                        "frequency": 3,
+                        "evidence": [],
+                        "status": "pending",
+                        "confidence": 0.6,
+                        "locked": False,
+                    }
+                ],
+            )
+            _write_provider_settings(
+                data_dir,
+                {
+                    "provider": "openai-compatible",
+                    "base_url": "https://api.example.test/v1",
+                    "model": "demo-model",
+                    "api_key": "saved-secret",
+                },
+            )
+            payload = json.dumps(
+                {
+                    "provider": "openai-compatible",
+                    "base_url": "https://api.example.test/v1",
+                    "model": "demo-model",
+                    "api_key": "",
+                    "target_language": "Simplified Chinese",
+                }
+            ).encode("utf-8")
+            captured = {}
+            handler = object.__new__(BabelWebHandler)
+            handler.engine = engine
+            handler.headers = {"Content-Length": str(len(payload))}
+            handler.rfile = BytesIO(payload)
+            handler._send_json = lambda data, status=200: captured.update(data=data, status=status)
+
+            handler._autofill_glossary_terms(job.job_id)
+
+            body = captured["data"]
+            self.assertEqual(CapturingProvider.api_key, "saved-secret")
+            self.assertEqual(body["glossary_terms"][0]["translation"], "译:Rook")
+            self.assertEqual(body["filled"], 1)
+
     def test_web_shell_exposes_upload_provider_progress_and_downloads(self) -> None:
         html = render_index_html()
         app_source = (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
@@ -61,6 +139,11 @@ class WebTests(unittest.TestCase):
         self.assertIn("View current job", app_source)
         self.assertIn("中文", app_source)
         self.assertIn("glossary-terms", app_source)
+        self.assertIn("glossary-terms/autofill", app_source)
+        self.assertIn("GlossaryModal", app_source)
+        self.assertIn("AI Fill Translations", app_source)
+        self.assertIn("Review Glossary", app_source)
+        self.assertIn("Start with pending glossary terms?", app_source)
         self.assertIn("Rows per page", app_source)
         self.assertIn("Previous", app_source)
         self.assertIn("Next", app_source)

@@ -568,10 +568,13 @@ def render_glossary_markdown(target_language: str, terms: list[dict]) -> str:
     else:
         decision_rows.append("| TODO | TODO | term |  | Add confirmed decisions before dispatching batches. |")
 
-    candidate_lines = [
-        f"- {term['source']} ({term['frequency']}, {term['type']}, confidence {term['confidence']:.2f})"
-        for term in pending
-    ]
+    candidate_lines = []
+    for term in pending:
+        draft = f" -> {term['translation']}" if term.get("translation") else ""
+        candidate_lines.append(
+            f"- {term['source']}{draft} "
+            f"({term['frequency']}, {term['type']}, confidence {term['confidence']:.2f})"
+        )
     if not candidate_lines:
         candidate_lines = ["- No pending candidates."]
     return (

@@ -49,6 +49,7 @@ from .providers import (
 ProviderFactory = Callable[[ProviderSettings], TranslationProvider]
 MAX_EVENTS = 500
 DEFAULT_MAX_BLOCKS = 20
+GLOSSARY_AUTOFILL_BATCH_SIZE = 40
 
 
 def utc_now() -> str:
@@ -477,6 +478,64 @@ class BabelJobEngine:
         job.glossary_summary = glossary_summary(normalized)
         job.message = "Glossary terms updated."
         self._append_event(job, "glossary", "Structured glossary terms updated.")
+        return self._set_job(job)
+
+    def autofill_glossary_terms(self, job_id: str, settings: ProviderSettings) -> BabelJob:
+        validate_provider_settings(settings)
+        provider = self.provider_factory(settings)
+        job = self.get_job(job_id)
+        terms = self.read_glossary_terms(job_id)
+        candidates = [
+            (index, term)
+            for index, term in enumerate(terms)
+            if str(term.get("status", "pending")) == "pending"
+            and not str(term.get("translation", "")).strip()
+            and str(term.get("source", "")).strip()
+        ]
+        filled = 0
+        glossary = render_glossary_markdown(job.target_language, terms)
+        context = (
+            "Translate glossary term candidates into concise, reusable target-language terms. "
+            "For names, provide a natural transliteration. For places, species, titles, and recurring terms, "
+            "provide a short stable translation. Return only the translated XHTML rows."
+        )
+        for offset in range(0, len(candidates), GLOSSARY_AUTOFILL_BATCH_SIZE):
+            batch = candidates[offset : offset + GLOSSARY_AUTOFILL_BATCH_SIZE]
+            rows = [
+                {
+                    "id": f"glossary-term::{index}",
+                    "source_text": str(term.get("source", "")),
+                    "source_html": f"<p>{escape(str(term.get('source', '')))}</p>",
+                }
+                for index, term in batch
+            ]
+            translated_rows = provider.translate_batch(rows, glossary=glossary, context=context)
+            translated_by_id = {str(row.get("id", "")): row for row in translated_rows}
+            for index, term in batch:
+                row = translated_by_id.get(f"glossary-term::{index}")
+                if not row:
+                    continue
+                translation = html_text(str(row.get("translated_html", ""))).strip()
+                if not translation:
+                    continue
+                if str(term.get("status", "pending")) != "pending" or str(term.get("translation", "")).strip():
+                    continue
+                term["translation"] = translation
+                term["locked"] = False
+                filled += 1
+
+        normalized = write_glossary_terms(job.work_dir, terms)
+        job.glossary_path.write_text(
+            render_glossary_markdown(job.target_language, normalized),
+            encoding="utf-8",
+        )
+        job.glossary_summary = glossary_summary(normalized)
+        job.message = (
+            f"AI filled {filled} glossary draft translation{'s' if filled != 1 else ''}."
+            if filled
+            else "No empty pending glossary terms needed AI draft translations."
+        )
+        self._append_event(job, "glossary-autofill", job.message, filled=filled)
         return self._set_job(job)
 
     def _mark_job_failed(self, job_id: str, error: Exception, batch: dict | None = None) -> BabelJob:
