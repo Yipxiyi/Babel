@@ -8,9 +8,20 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
 from typing import Callable
 
+from .glossary import (
+    detect_glossary_issues,
+    glossary_summary,
+    html_text,
+    read_glossary_terms,
+    render_glossary_markdown,
+    repair_untranslated_terms,
+    write_ai_quality_report,
+    write_glossary_terms,
+)
 from .pipeline import (
     command_apply,
     command_audit,
@@ -119,6 +130,7 @@ class BabelJob:
     output_book: Path | None = None
     audit_path: Path | None = None
     report_path: Path | None = None
+    ai_quality_report_path: Path | None = None
     current_batch: dict | None = None
     failed_batch: dict | None = None
     active_batches: list[dict] = field(default_factory=list)
@@ -127,6 +139,12 @@ class BabelJob:
     last_active_at: str = ""
     events: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    ai_qa_status: str = "pending"
+    ai_qa_summary: dict = field(default_factory=dict)
+    ai_fix_summary: dict = field(default_factory=dict)
+    glossary_summary: dict = field(default_factory=dict)
+    generated_title: str = ""
+    title_source: str = "manual"
 
     def to_dict(self, include_paths: bool = True) -> dict:
         data = asdict(self)
@@ -138,6 +156,7 @@ class BabelJob:
             "output_book",
             "audit_path",
             "report_path",
+            "ai_quality_report_path",
         )
         for key in path_keys:
             value = data.get(key)
@@ -214,6 +233,9 @@ class BabelJobEngine:
             output_book=Path(data["output_book"]) if data.get("output_book") else None,
             audit_path=Path(data["audit_path"]) if data.get("audit_path") else None,
             report_path=Path(data["report_path"]) if data.get("report_path") else None,
+            ai_quality_report_path=Path(data["ai_quality_report_path"])
+            if data.get("ai_quality_report_path")
+            else None,
             current_batch=data.get("current_batch"),
             failed_batch=failed_batch,
             active_batches=active_batches,
@@ -222,6 +244,12 @@ class BabelJobEngine:
             last_active_at=last_active_at,
             events=events,
             errors=list(data.get("errors", [])),
+            ai_qa_status=data.get("ai_qa_status", "pending"),
+            ai_qa_summary=dict(data.get("ai_qa_summary") or {}),
+            ai_fix_summary=dict(data.get("ai_fix_summary") or {}),
+            glossary_summary=dict(data.get("glossary_summary") or {}),
+            generated_title=data.get("generated_title", ""),
+            title_source=data.get("title_source", "manual"),
         )
 
     def _save_job(self, job: BabelJob) -> None:
@@ -374,13 +402,15 @@ class BabelJobEngine:
         manifest = json.loads((work_dir / "pipeline" / "batch_manifest.json").read_text(encoding="utf-8"))
         input_metadata = json.loads((work_dir / "pipeline" / "input_format.json").read_text(encoding="utf-8"))
         blocks = read_jsonl(work_dir / "pipeline" / "blocks.jsonl")
+        terms = read_glossary_terms(work_dir)
+        title = request.title or default_output_title(request.filename, request.target_language)
         job = BabelJob(
             job_id=job_id,
             status="prepared",
             filename=request.filename,
             input_format=input_metadata.get("input_format", extension),
             target_language=request.target_language,
-            title=request.title,
+            title=title,
             language=request.language,
             output_format=output_format,
             work_dir=work_dir,
@@ -389,6 +419,8 @@ class BabelJobEngine:
             total_batches=len(manifest),
             block_count=len(blocks),
             message="Prepared. Review glossary, then start translation.",
+            glossary_summary=glossary_summary(terms),
+            title_source="manual" if request.title else "suffix",
         )
         self._append_event(job, "prepared", f"Prepared {len(manifest)} batches from {len(blocks)} blocks.")
         return self._set_job(job)
@@ -406,11 +438,45 @@ class BabelJobEngine:
     def read_glossary(self, job_id: str) -> str:
         return self.get_job(job_id).glossary_path.read_text(encoding="utf-8")
 
+    def read_glossary_terms(self, job_id: str) -> list[dict]:
+        job = self.get_job(job_id)
+        terms = read_glossary_terms(job.work_dir)
+        if terms:
+            return terms
+        return self._refresh_glossary_from_terms(job)
+
+    def _refresh_glossary_from_terms(self, job: BabelJob) -> list[dict]:
+        terms = read_glossary_terms(job.work_dir)
+        if not terms:
+            pipeline_dir = job.work_dir / "pipeline"
+            from .glossary import build_glossary_terms
+
+            terms = build_glossary_terms(pipeline_dir, job.target_language)
+        job.glossary_path.write_text(
+            render_glossary_markdown(job.target_language, terms),
+            encoding="utf-8",
+        )
+        job.glossary_summary = glossary_summary(terms)
+        self._save_job(job)
+        return terms
+
     def update_glossary(self, job_id: str, content: str) -> BabelJob:
         job = self.get_job(job_id)
         job.glossary_path.write_text(content, encoding="utf-8")
         job.message = "Glossary updated."
         self._append_event(job, "glossary", "Glossary updated.")
+        return self._set_job(job)
+
+    def update_glossary_terms(self, job_id: str, terms: list[dict]) -> BabelJob:
+        job = self.get_job(job_id)
+        normalized = write_glossary_terms(job.work_dir, terms)
+        job.glossary_path.write_text(
+            render_glossary_markdown(job.target_language, normalized),
+            encoding="utf-8",
+        )
+        job.glossary_summary = glossary_summary(normalized)
+        job.message = "Glossary terms updated."
+        self._append_event(job, "glossary", "Structured glossary terms updated.")
         return self._set_job(job)
 
     def _mark_job_failed(self, job_id: str, error: Exception, batch: dict | None = None) -> BabelJob:
@@ -451,7 +517,14 @@ class BabelJobEngine:
 
         return self._mutate_job(job_id, mutate)
 
-    def start_job(self, job_id: str, settings: ProviderSettings, resume: bool = False) -> BabelJob:
+    def start_job(
+        self,
+        job_id: str,
+        settings: ProviderSettings,
+        resume: bool = False,
+        ai_qa_enabled: bool = True,
+        auto_title_enabled: bool = False,
+    ) -> BabelJob:
         job = self.get_job(job_id)
         if job.status == "running":
             return job
@@ -460,7 +533,11 @@ class BabelJobEngine:
         except ValueError as exc:
             self._mark_job_failed(job_id, exc)
             raise
-        thread = threading.Thread(target=self.run_job, args=(job_id, settings, resume), daemon=True)
+        thread = threading.Thread(
+            target=self.run_job,
+            args=(job_id, settings, resume, ai_qa_enabled, auto_title_enabled),
+            daemon=True,
+        )
         with self._lock:
             self._threads[job_id] = thread
         thread.start()
@@ -499,7 +576,143 @@ class BabelJobEngine:
                     continue
                 raise
 
-    def _finalize_completed_job(self, job_id: str, pipeline_dir: Path) -> BabelJob:
+    def _run_ai_quality_checks(
+        self,
+        job_id: str,
+        pipeline_dir: Path,
+        enabled: bool,
+    ) -> None:
+        if not enabled:
+            report = {
+                "enabled": False,
+                "status": "skipped",
+                "detected": 0,
+                "fixed": 0,
+                "remaining": 0,
+                "blocking_remaining": 0,
+                "issues": [],
+            }
+            path = write_ai_quality_report(pipeline_dir, report)
+
+            def skipped(job: BabelJob) -> None:
+                job.ai_qa_status = "skipped"
+                job.ai_quality_report_path = path
+                job.ai_qa_summary = report
+                self._append_event(job, "ai-qa-skip", "AI quality checks skipped by settings.")
+
+            self._mutate_job(job_id, skipped)
+            return
+
+        job = self.get_job(job_id)
+        terms = self.read_glossary_terms(job_id)
+        total_detected = 0
+        total_fixed = 0
+        remaining: list[dict] = []
+        self._mutate_job(
+            job_id,
+            lambda current: self._append_event(
+                current,
+                "ai-qa-start",
+                "Checking glossary consistency and untranslated locked terms.",
+            ),
+        )
+        for round_number in range(1, 3):
+            issues = detect_glossary_issues(pipeline_dir, terms)
+            total_detected += len(issues) if round_number == 1 else 0
+            if not issues:
+                remaining = []
+                break
+            fixed = repair_untranslated_terms(pipeline_dir, terms, issues)
+            total_fixed += fixed
+            self._mutate_job(
+                job_id,
+                lambda current, count=fixed, number=round_number: self._append_event(
+                    current,
+                    "ai-qa-fix",
+                    f"AI QA repair round {number} fixed {count} translated rows.",
+                ),
+            )
+            remaining = detect_glossary_issues(pipeline_dir, terms)
+            blocking = [issue for issue in remaining if issue.get("kind") == "untranslated-source-term"]
+            if not blocking:
+                break
+        blocking_remaining = [issue for issue in remaining if issue.get("kind") == "untranslated-source-term"]
+        report = {
+            "enabled": True,
+            "status": "failed" if blocking_remaining else "passed",
+            "detected": total_detected,
+            "fixed": total_fixed,
+            "remaining": len(remaining),
+            "blocking_remaining": len(blocking_remaining),
+            "issues": remaining[:200],
+        }
+        path = write_ai_quality_report(pipeline_dir, report)
+
+        def finish(job: BabelJob) -> None:
+            job.ai_qa_status = report["status"]
+            job.ai_quality_report_path = path
+            job.ai_qa_summary = {
+                "detected": report["detected"],
+                "remaining": report["remaining"],
+                "blocking_remaining": report["blocking_remaining"],
+            }
+            job.ai_fix_summary = {"fixed": total_fixed, "rounds": 2 if remaining else 1}
+            message = (
+                f"AI QA fixed {total_fixed} rows; {len(blocking_remaining)} blocking issues remain."
+                if blocking_remaining
+                else f"AI QA fixed {total_fixed} rows; no blocking glossary issues remain."
+            )
+            self._append_event(job, "ai-qa-done", message)
+
+        self._mutate_job(job_id, finish)
+        if blocking_remaining:
+            raise RuntimeError(
+                "AI QA found untranslated locked terms after repair: "
+                + "; ".join(issue["message"] for issue in blocking_remaining[:5])
+            )
+
+    def _maybe_generate_title(
+        self,
+        job_id: str,
+        settings: ProviderSettings,
+        provider: TranslationProvider,
+        glossary: str,
+        enabled: bool,
+    ) -> None:
+        if not enabled:
+            return
+        job = self.get_job(job_id)
+        source_title = Path(job.filename).stem
+        if not source_title:
+            return
+        try:
+            rows = [
+                {
+                    "id": "book-title",
+                    "source_text": source_title,
+                    "source_html": f"<p>{escape(source_title)}</p>",
+                }
+            ]
+            translated = provider.translate_batch(
+                rows,
+                glossary=glossary,
+                context="Translate this ebook title naturally. Return only the translated title row.",
+            )
+            generated = html_text(str(translated[0].get("translated_html", ""))).strip()
+        except Exception:
+            generated = ""
+        if not generated:
+            generated = default_output_title(job.filename, settings.target_language)
+
+        def mutate(job: BabelJob) -> None:
+            job.title = generated
+            job.generated_title = generated
+            job.title_source = "generated"
+            self._append_event(job, "title", f"Generated output title: {generated}")
+
+        self._mutate_job(job_id, mutate)
+
+    def _finalize_completed_job(self, job_id: str, pipeline_dir: Path, ai_qa_enabled: bool) -> BabelJob:
         self._mutate_job(
             job_id,
             lambda job: self._append_event(job, "validating", "Validating all translated batches."),
@@ -508,6 +721,17 @@ class BabelJobEngine:
             command_validate_batches(Namespace(pipeline_dir=pipeline_dir))
         except SystemExit as exc:
             raise RuntimeError(f"translated batch validation failed with exit code {exc.code}") from exc
+
+        self._run_ai_quality_checks(job_id, pipeline_dir, ai_qa_enabled)
+
+        self._mutate_job(
+            job_id,
+            lambda job: self._append_event(job, "validating", "Revalidating translated batches after AI QA."),
+        )
+        try:
+            command_validate_batches(Namespace(pipeline_dir=pipeline_dir))
+        except SystemExit as exc:
+            raise RuntimeError(f"post-QA batch validation failed with exit code {exc.code}") from exc
 
         job = self.get_job(job_id)
         output_epub = job.work_dir / "output.epub"
@@ -556,21 +780,31 @@ class BabelJobEngine:
 
         return self._mutate_job(job_id, mutate)
 
-    def run_job(self, job_id: str, settings: ProviderSettings, resume: bool = False) -> BabelJob:
+    def run_job(
+        self,
+        job_id: str,
+        settings: ProviderSettings,
+        resume: bool = False,
+        ai_qa_enabled: bool = True,
+        auto_title_enabled: bool = False,
+    ) -> BabelJob:
         try:
             validate_provider_settings(settings)
             # Catch provider setup failures before marking the job as actively translating.
-            self.provider_factory(settings)
+            provider = self.provider_factory(settings)
             job = self.get_job(job_id)
             pipeline_dir = job.work_dir / "pipeline"
             translated_dir = pipeline_dir / "translated"
             translated_dir.mkdir(parents=True, exist_ok=True)
             manifest = json.loads((pipeline_dir / "batch_manifest.json").read_text(encoding="utf-8"))
             context_path = pipeline_dir / "translation_context.md"
-            glossary = job.glossary_path.read_text(encoding="utf-8")
+            terms = self.read_glossary_terms(job_id)
+            glossary = render_glossary_markdown(job.target_language, terms)
+            job.glossary_path.write_text(glossary, encoding="utf-8")
             context = context_path.read_text(encoding="utf-8") if context_path.exists() else ""
             valid_resume_batches = self._valid_resume_batch_numbers(pipeline_dir, manifest) if resume else set()
             max_concurrency = normalize_max_concurrency(settings.max_concurrency)
+            self._maybe_generate_title(job_id, settings, provider, glossary, auto_title_enabled)
 
             def start_mutation(job: BabelJob) -> None:
                 job.status = "running"
@@ -581,6 +815,10 @@ class BabelJobEngine:
                 job.failed_batches = []
                 job.max_concurrency = max_concurrency
                 job.errors = []
+                job.ai_qa_status = "pending" if ai_qa_enabled else "skipped"
+                job.ai_qa_summary = {}
+                job.ai_fix_summary = {}
+                job.glossary_summary = glossary_summary(terms)
                 job.message = (
                     f"Resuming translation with {job.completed_batches}/{job.total_batches} valid batches."
                     if resume
@@ -630,9 +868,16 @@ class BabelJobEngine:
 
             if self.get_job(job_id).failed_batches:
                 return self._mark_job_failed_after_batches(job_id)
-            return self._finalize_completed_job(job_id, pipeline_dir)
+            return self._finalize_completed_job(job_id, pipeline_dir, ai_qa_enabled)
         except Exception as exc:
             return self._mark_job_failed(job_id, exc)
 
 
 __all__ = ["BabelJob", "BabelJobEngine", "JobRequest", "ProviderSettings"]
+
+
+def default_output_title(filename: str, target_language: str) -> str:
+    stem = Path(filename).stem or "Translated book"
+    if "chinese" in target_language.lower() or "zh" in target_language.lower() or "中文" in target_language:
+        return f"{stem}（简体中文版）"
+    return f"{stem} ({target_language})"

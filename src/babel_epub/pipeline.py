@@ -22,6 +22,7 @@ from typing import Iterable
 from xml.etree import ElementTree as ET
 
 from .formats import convert_epub_to_output, normalize_to_epub, write_input_format_metadata, write_output_format_metadata
+from .glossary import build_glossary_terms, render_glossary_markdown
 
 
 XHTML_NS = "http://www.w3.org/1999/xhtml"
@@ -417,37 +418,9 @@ def extract_name_candidates(out_dir: Path, min_count: int) -> list[dict]:
 
 
 def default_glossary(target_language: str, out_dir: Path) -> str:
-    candidates = extract_name_candidates(out_dir, min_count=3)
-    candidate_lines = "\n".join(f"- {row['term']} ({row['count']})" for row in candidates[:80])
-    if not candidate_lines:
-        candidate_lines = "- No repeated name candidates met the threshold."
-    return f"""# Translation Glossary
-
-This glossary is the single source of truth for all chapter/batch translation workers.
-
-## Global Style
-
-- Target language: {target_language}.
-- Translate naturally and contextually. Do not translate sentence-by-sentence mechanically.
-- Preserve the source tone, pacing, paragraph structure, humor, implication, register, and emotional continuity.
-- Do not summarize, abridge, censor, moralize, or add translator commentary.
-- Translate only human-readable text.
-- Preserve XHTML root tags, attributes, IDs, anchors, links, images, CSS class names, and inline emphasis tags.
-- Keep foreign words untranslated only when they are names, brands, invented terms, URLs, code-like content, or intentionally foreign in context.
-- Maintain a global mapping for character names, places, organizations, titles, nicknames, and recurring terms.
-
-## Name And Term Decisions
-
-| Source | Translation | Notes |
-| --- | --- | --- |
-| TODO | TODO | Add confirmed decisions here before dispatching chapter batches. |
-
-## Candidate Terms From Scan
-
-Review these candidates before dispatching batches. Promote any term that needs consistency into the table above.
-
-{candidate_lines}
-"""
+    extract_name_candidates(out_dir, min_count=3)
+    terms = build_glossary_terms(out_dir, target_language)
+    return render_glossary_markdown(target_language, terms)
 
 
 def worker_instructions(target_language: str) -> str:

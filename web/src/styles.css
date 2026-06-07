@@ -150,6 +150,24 @@ a {
   animation: status-pulse 1.35s ease-out infinite;
 }
 
+.progress-track {
+  position: relative;
+}
+
+.progress-track.is-running::after {
+  animation: progress-shimmer 1.3s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    oklch(98.4% 0.016 75 / 0.72),
+    transparent
+  );
+  content: "";
+  inset: 0;
+  position: absolute;
+  transform: translateX(-100%);
+}
+
 @keyframes terminal-blink {
   50% {
     opacity: 0;
@@ -165,6 +183,12 @@ a {
   }
 }
 
+@keyframes progress-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -173,5 +197,9 @@ a {
     transition-duration: 1ms !important;
     animation-duration: 1ms !important;
     animation-iteration-count: 1 !important;
+  }
+
+  .progress-track.is-running::after {
+    display: none;
   }
 }

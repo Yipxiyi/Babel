@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "babel-epub"
-version = "0.7.0"
+version = "0.7.1"
 description = "Layout-preserving ebook translation pipeline for agentic chapter-by-chapter workflows."
 readme = "README.md"
 requires-python = ">=3.11"

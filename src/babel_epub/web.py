@@ -6,12 +6,15 @@ import json
 import mimetypes
 import os
 import re
+from importlib import metadata
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from . import __version__
+from .formats import supported_input_extensions, supported_output_extensions
 from .jobs import BabelJobEngine, JobRequest
 from .providers import (
     DEFAULT_MAX_CONCURRENCY,
@@ -65,6 +68,16 @@ class BabelWebHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/meta":
+            self._send_json(
+                {
+                    "version": _package_version(),
+                    "github_url": "https://github.com/Yipxiyi/Babel",
+                    "supported_input_formats": supported_input_extensions(),
+                    "supported_output_formats": supported_output_extensions(),
+                }
+            )
+            return
         if path == "/api/jobs":
             self._send_json({"jobs": [job.to_dict(include_paths=False) for job in self.engine.list_jobs()]})
             return
@@ -72,6 +85,9 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             self._send_json({"provider_settings": _public_provider_settings(_read_provider_settings(self.engine.data_dir))})
             return
         parts = [unquote(part) for part in path.strip("/").split("/")]
+        if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "glossary-terms":
+            self._send_glossary_terms(parts[2])
+            return
         if len(parts) == 3 and parts[:2] == ["api", "jobs"]:
             self._send_job(parts[2])
             return
@@ -88,6 +104,14 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
+    def do_PUT(self) -> None:
+        path = urlparse(self.path).path
+        parts = [unquote(part) for part in path.strip("/").split("/")]
+        if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "glossary-terms":
+            self._update_glossary_terms(parts[2])
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if path == "/api/jobs":
@@ -99,6 +123,9 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "start":
             self._start_job(parts[2])
+            return
+        if path == "/api/provider-settings":
+            self._save_provider_settings()
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -157,6 +184,31 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"job": job.to_dict(include_paths=False), "glossary": glossary})
 
+    def _send_glossary_terms(self, job_id: str) -> None:
+        try:
+            job = self.engine.get_job(job_id)
+            terms = self.engine.read_glossary_terms(job_id)
+        except KeyError:
+            self.send_error(HTTPStatus.NOT_FOUND, "job not found")
+            return
+        self._send_json({"job": job.to_dict(include_paths=False), "glossary_terms": terms})
+
+    def _update_glossary_terms(self, job_id: str) -> None:
+        try:
+            data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8"))
+            terms = data.get("glossary_terms", data)
+            if not isinstance(terms, list):
+                raise ValueError("glossary_terms must be a list")
+            job = self.engine.update_glossary_terms(job_id, terms)
+            updated = self.engine.read_glossary_terms(job_id)
+        except KeyError:
+            self.send_error(HTTPStatus.NOT_FOUND, "job not found")
+            return
+        except (ValueError, json.JSONDecodeError) as exc:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        self._send_json({"job": job.to_dict(include_paths=False), "glossary_terms": updated})
+
     def _update_glossary(self, job_id: str) -> None:
         try:
             content = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8")
@@ -189,6 +241,8 @@ class BabelWebHandler(BaseHTTPRequestHandler):
                     ),
                 ),
                 resume=data.get("resume") is True,
+                ai_qa_enabled=bool(merged_data.get("ai_qa_enabled", True)),
+                auto_title_enabled=bool(merged_data.get("auto_title_enabled", False)),
             )
             _write_provider_settings(self.engine.data_dir, merged_data)
         except KeyError:
@@ -204,6 +258,22 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             }
         )
 
+    def _save_provider_settings(self) -> None:
+        try:
+            data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8"))
+            stored_settings = _read_provider_settings(self.engine.data_dir)
+            merged = _merge_provider_settings(data, stored_settings)
+            if merged.get("auto_title_enabled") and not (
+                str(merged.get("api_key", "")).strip()
+                or str(merged.get("provider", "")).lower().strip() in {"fake", "dry-run", "dry_run"}
+            ):
+                merged["auto_title_enabled"] = False
+            _write_provider_settings(self.engine.data_dir, merged)
+        except json.JSONDecodeError as exc:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        self._send_json({"provider_settings": _public_provider_settings(_read_provider_settings(self.engine.data_dir))})
+
     def _download(self, job_id: str, artifact: str) -> None:
         try:
             job = self.engine.get_job(job_id)
@@ -215,13 +285,14 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             "glossary": job.glossary_path,
             "report": job.report_path,
             "audit": job.audit_path,
+            "ai-report": job.ai_quality_report_path,
         }
         artifact_path = path_map.get(artifact)
         if artifact_path is None or not artifact_path.exists():
             self.send_error(HTTPStatus.NOT_FOUND, "artifact not ready")
             return
         content_type = _content_type_for_download(artifact_path) if artifact == "output" else "text/plain; charset=utf-8"
-        if artifact == "audit":
+        if artifact in {"audit", "ai-report"}:
             content_type = "application/json; charset=utf-8"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
@@ -270,6 +341,8 @@ def _write_provider_settings(data_dir: Path, settings: dict) -> None:
         "max_concurrency": normalize_max_concurrency(settings.get("max_concurrency", DEFAULT_MAX_CONCURRENCY)),
         "request_timeout": normalize_request_timeout(settings.get("request_timeout", DEFAULT_REQUEST_TIMEOUT)),
         "max_retries": normalize_max_retries(settings.get("max_retries", DEFAULT_MAX_RETRIES)),
+        "ai_qa_enabled": bool(settings.get("ai_qa_enabled", True)),
+        "auto_title_enabled": bool(settings.get("auto_title_enabled", False)),
     }
     path = _provider_settings_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -289,6 +362,8 @@ def _public_provider_settings(settings: dict) -> dict:
         "max_concurrency": normalize_max_concurrency(settings.get("max_concurrency", DEFAULT_MAX_CONCURRENCY)),
         "request_timeout": normalize_request_timeout(settings.get("request_timeout", DEFAULT_REQUEST_TIMEOUT)),
         "max_retries": normalize_max_retries(settings.get("max_retries", DEFAULT_MAX_RETRIES)),
+        "ai_qa_enabled": bool(settings.get("ai_qa_enabled", True)),
+        "auto_title_enabled": bool(settings.get("auto_title_enabled", False)),
     }
 
 
@@ -301,7 +376,16 @@ def _merge_provider_settings(data: dict, stored: dict) -> dict:
     same_secret_scope = provider == stored_provider and base_url == stored_base_url
     if not str(merged.get("api_key") or "").strip() and same_secret_scope:
         merged["api_key"] = stored.get("api_key", "")
-    for key in ("provider", "base_url", "model", "max_concurrency", "request_timeout", "max_retries"):
+    for key in (
+        "provider",
+        "base_url",
+        "model",
+        "max_concurrency",
+        "request_timeout",
+        "max_retries",
+        "ai_qa_enabled",
+        "auto_title_enabled",
+    ):
         if merged.get(key) in (None, "") and stored.get(key) not in (None, ""):
             merged[key] = stored[key]
     merged["provider"] = provider
@@ -378,6 +462,13 @@ def _content_type_for_download(path: Path) -> str:
         ".htmlz": "application/zip",
         ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     }.get(path.suffix.lower(), "application/octet-stream")
+
+
+def _package_version() -> str:
+    try:
+        return metadata.version("babel-epub")
+    except metadata.PackageNotFoundError:
+        return __version__
 
 
 def run_server(host: str = "127.0.0.1", port: int = 7860, data_dir: Path | None = None) -> None:

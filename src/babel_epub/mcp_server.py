@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .jobs import BabelJobEngine, JobRequest
 from .providers import (
     DEFAULT_MAX_CONCURRENCY,
@@ -59,6 +60,8 @@ TOOLS = [
             "max_concurrency": {"type": "integer", "default": DEFAULT_MAX_CONCURRENCY, "minimum": 1, "maximum": 8},
             "request_timeout": {"type": "number", "default": DEFAULT_REQUEST_TIMEOUT, "minimum": 30},
             "max_retries": {"type": "integer", "default": DEFAULT_MAX_RETRIES, "minimum": 0, "maximum": 5},
+            "ai_qa_enabled": {"type": "boolean", "default": True},
+            "auto_title_enabled": {"type": "boolean", "default": False},
         },
         ["job_id", "provider", "model"],
     ),
@@ -86,7 +89,7 @@ class BabelMCP:
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "babel-mcp", "version": "0.6.0"},
+                    "serverInfo": {"name": "babel-mcp", "version": __version__},
                 },
             }
         if method == "notifications/initialized":
@@ -144,6 +147,8 @@ class BabelMCP:
                     ),
                 ),
                 resume=arguments.get("resume") is True,
+                ai_qa_enabled=arguments.get("ai_qa_enabled", True) is not False,
+                auto_title_enabled=arguments.get("auto_title_enabled") is True,
             )
             return {"job": job.to_dict(include_paths=True)}
         if name == "job_status":

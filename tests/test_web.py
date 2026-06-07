@@ -6,6 +6,7 @@ from pathlib import Path
 
 from babel_epub.web import (
     _merge_provider_settings,
+    _package_version,
     _parse_multipart_form,
     _public_provider_settings,
     _read_provider_settings,
@@ -31,6 +32,8 @@ class WebTests(unittest.TestCase):
         self.assertIn(".mobi", app_source)
         self.assertIn(".pdf", app_source)
         self.assertIn("API Provider", app_source)
+        self.assertIn("SettingsModal", app_source)
+        self.assertNotIn("ProviderPanel", app_source)
         self.assertIn("Concurrency", app_source)
         self.assertIn("Request timeout", app_source)
         self.assertIn("Retries", app_source)
@@ -57,6 +60,15 @@ class WebTests(unittest.TestCase):
         self.assertIn("Start with upload", app_source)
         self.assertIn("View current job", app_source)
         self.assertIn("中文", app_source)
+        self.assertIn("glossary-terms", app_source)
+        self.assertIn("Rows per page", app_source)
+        self.assertIn("Previous", app_source)
+        self.assertIn("Next", app_source)
+        self.assertIn("AI QA repair loop", app_source)
+        self.assertIn("Auto-generate output title", app_source)
+        self.assertIn("onDrop", app_source)
+        self.assertIn("Process terminal collapsed", app_source)
+        self.assertIn("progress-track", app_source)
 
     def test_static_asset_resolver_serves_assets_without_path_traversal(self) -> None:
         assets = sorted((ROOT / "src" / "babel_epub" / "static" / "assets").glob("index-*.js"))
@@ -95,6 +107,8 @@ class WebTests(unittest.TestCase):
                     "max_concurrency": 3,
                     "request_timeout": 300,
                     "max_retries": 1,
+                    "ai_qa_enabled": True,
+                    "auto_title_enabled": True,
                 },
             )
 
@@ -114,6 +128,11 @@ class WebTests(unittest.TestCase):
             self.assertTrue(public["has_api_key"])
             self.assertNotIn("api_key", public)
             self.assertEqual(merged["api_key"], "sk-secret")
+            self.assertTrue(public["ai_qa_enabled"])
+            self.assertTrue(public["auto_title_enabled"])
+
+    def test_meta_version_uses_package_version(self) -> None:
+        self.assertEqual(_package_version(), "0.7.0")
 
 
 if __name__ == "__main__":
