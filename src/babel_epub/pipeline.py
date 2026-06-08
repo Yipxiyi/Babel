@@ -287,7 +287,7 @@ def translatable_elements(path: Path) -> list[ET.Element]:
 
 
 def classify_doc(label: str) -> str:
-    if re.fullmatch(r"Chapter\s+\d+", label or "", flags=re.IGNORECASE):
+    if re.match(r"Chapter\s+\d+\b", label or "", flags=re.IGNORECASE):
         return "chapter"
     lowered = (label or "").lower()
     if any(token in lowered for token in ("contents", "cover", "title", "copyright", "praise")):

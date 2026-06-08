@@ -9,7 +9,8 @@
 
 ### Changed
 
-- Glossary/name candidate extraction now reuses the structured glossary noise filter and skips common modern dialogue, exclamation, weekday, social-media, and family-address false positives.
+- Glossary/name candidate extraction now reuses the structured glossary noise filter and skips common modern dialogue, bookish sentence-start, exclamation, weekday, social-media, and family-address false positives.
+- EPUB chapter classification now recognizes chapter labels with title suffixes such as `Chapter 1 - THE GREAT STORM CHAMBER LIBRARY`.
 - Web glossary review now defaults to a compact readiness summary and opens the full editable table in a modal.
 - Starting translation with pending or empty glossary draft terms now shows a soft confirmation instead of silently proceeding.
 

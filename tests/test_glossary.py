@@ -37,6 +37,10 @@ class GlossaryTests(unittest.TestCase):
                         "id": "chapter.xhtml::0004",
                         "source_text": "His boots were wet. She said, I’m tired. Night fell quickly. Wumeru listened to Wumeru.",
                     },
+                    {
+                        "id": "chapter.xhtml::0005",
+                        "source_text": "Great Storm Chamber stood above the city. Great things were expected there.",
+                    },
                 ],
             )
 
@@ -55,6 +59,8 @@ class GlossaryTests(unittest.TestCase):
             self.assertEqual(by_source["Rook"]["translation"], "鲁克")
             self.assertEqual(by_source["Deepwoods"]["translation"], "深林")
             self.assertEqual(by_source["banderbear"]["translation"], "班德熊")
+            self.assertEqual(by_source["Great Storm Chamber"]["aliases"], [])
+            self.assertNotIn("Great", by_source)
             self.assertEqual(by_source["Rook"]["status"], "approved")
             self.assertEqual(by_source["Wumeru"]["status"], "pending")
             self.assertFalse(by_source["Wumeru"]["locked"])
@@ -123,6 +129,130 @@ class GlossaryTests(unittest.TestCase):
                 "Where",
                 "Which",
                 "Yeah",
+            ):
+                self.assertNotIn(noise, by_source)
+
+    def test_structured_glossary_filters_bookish_sentence_start_noise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pipeline_dir = Path(tmp)
+            write_jsonl(
+                pipeline_dir / "blocks.jsonl",
+                [
+                    {
+                        "id": "chapter.xhtml::0001",
+                        "source_text": "Rook watched Wumeru from the bridge. From there, Wumeru waved to Rook.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0002",
+                        "source_text": "Its light flickered. Each path bent away. Despite the mist, Quickly they moved.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0003",
+                        "source_text": "Slowly, Welcome, Stay, Far, Time, Light, Earth, No-one.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0004",
+                        "source_text": "Aargh. Urrgh. Wuh. Wuh-wuh. Whup. The Skyraider watched Rook.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0005",
+                        "source_text": "Several. Around. Pass. Steady. More. Fare. Wumeru stayed with Rook.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0006",
+                        "source_text": "Believe. Fifty. Study. Stop. Aye. Darkness. Wumeru saw Rook.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0007",
+                        "source_text": "Apart. Dead. Ever. Flying. Loom. Open Sky. Stone Gardens. Sometimes. Wahoo.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0008",
+                        "source_text": "Apart. Dead. Ever. Flying. Loom. Open Sky. Stone Gardens. Sometimes. Wahoo.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0009",
+                        "source_text": "Beneath. Delicious. Help. Looking. Golden Nest.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0010",
+                        "source_text": "Beneath. Delicious. Help. Looking. Golden Nest.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0011",
+                        "source_text": "Heart. Leave. Nor.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0012",
+                        "source_text": "Heart. Leave. Nor.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0013",
+                        "source_text": "Down.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0014",
+                        "source_text": "Down.",
+                    },
+                ],
+            )
+
+            terms = build_glossary_terms(pipeline_dir, "Simplified Chinese")
+            by_source = {term["source"]: term for term in terms}
+
+            self.assertIn("Rook", by_source)
+            self.assertIn("Wumeru", by_source)
+            self.assertEqual(by_source["Open Sky"]["type"], "place")
+            self.assertEqual(by_source["Stone Gardens"]["type"], "place")
+            self.assertEqual(by_source["Golden Nest"]["type"], "place")
+            for noise in (
+                "Aargh",
+                "Apart",
+                "Around",
+                "Aye",
+                "Believe",
+                "Beneath",
+                "Darkness",
+                "Dead",
+                "Delicious",
+                "Despite",
+                "Down",
+                "Each",
+                "Earth",
+                "Ever",
+                "Fare",
+                "Far",
+                "Fifty",
+                "Flying",
+                "From",
+                "Heart",
+                "Help",
+                "Its",
+                "Leave",
+                "Light",
+                "Looking",
+                "Loom",
+                "More",
+                "No-one",
+                "Nor",
+                "Open",
+                "Pass",
+                "Quickly",
+                "Several",
+                "Slowly",
+                "Sometimes",
+                "Stay",
+                "Steady",
+                "Stop",
+                "Study",
+                "The Skyraider",
+                "Time",
+                "Urrgh",
+                "Wahoo",
+                "Welcome",
+                "Whup",
+                "Wuh",
+                "Wuh-wuh",
             ):
                 self.assertNotIn(noise, by_source)
 
