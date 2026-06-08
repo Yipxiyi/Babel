@@ -5,6 +5,7 @@
 ### Added
 
 - Batch translation recovery now retries provider safety rejections in smaller chunks before marking the batch failed.
+- Provider JSONL parsing now has a relaxed fallback for malformed XHTML attribute quotes and stray provider prefixes in otherwise recoverable row objects.
 - Web/API glossary autofill action that drafts missing pending term translations with the configured provider while preserving human-approved, edited, and ignored glossary rows.
 
 ### Changed

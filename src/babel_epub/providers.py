@@ -184,6 +184,55 @@ def safe_preview(text: str, limit: int = 240) -> str:
     return compact[:limit]
 
 
+def relaxed_json_string(value: str) -> str:
+    return (
+        value.replace("\\n", "\n")
+        .replace("\\r", "\r")
+        .replace("\\t", "\t")
+        .replace('\\"', '"')
+        .replace("\\/", "/")
+    )
+
+
+def parse_relaxed_jsonl_rows(value: str) -> list[dict]:
+    start = value.find("{")
+    if start == -1:
+        return []
+    payload = value[start:].strip()
+    chunks = re.split(r"}\s*(?={)", payload)
+    rows: list[dict] = []
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if not chunk.endswith("}"):
+            chunk = f"{chunk}}}"
+        try:
+            parsed = json.loads(chunk)
+            if isinstance(parsed, dict):
+                rows.append(parsed)
+                continue
+        except json.JSONDecodeError:
+            pass
+
+        id_match = re.search(r'"id"\s*:\s*"((?:\\.|[^"\\])*)"', chunk)
+        html_match = re.search(r'"translated_html"\s*:\s*"', chunk)
+        if not id_match or not html_match:
+            return []
+        translated_html = chunk[html_match.end() :].strip()
+        if translated_html.endswith("}"):
+            translated_html = translated_html[:-1].rstrip()
+        if translated_html.endswith('"'):
+            translated_html = translated_html[:-1]
+        rows.append(
+            {
+                "id": relaxed_json_string(id_match.group(1)),
+                "translated_html": relaxed_json_string(translated_html),
+            }
+        )
+    return rows
+
+
 def parse_translated_rows(text: str) -> list[dict]:
     value = strip_markdown_fence(text)
     if not value:
@@ -228,6 +277,7 @@ def parse_translated_rows(text: str) -> list[dict]:
         return streamed_rows
 
     rows: list[dict] = []
+    first_error: tuple[int, json.JSONDecodeError] | None = None
     for line_number, line in enumerate(value.splitlines(), start=1):
         line = line.strip()
         if not line:
@@ -235,14 +285,21 @@ def parse_translated_rows(text: str) -> list[dict]:
         try:
             row = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"provider returned invalid JSONL at line {line_number}: {exc}; "
-                f"preview={safe_preview(value)}"
-            ) from exc
+            first_error = (line_number, exc)
+            break
         if not isinstance(row, dict):
             raise ValueError(f"provider returned non-object JSONL row at line {line_number}")
         rows.append(row)
-    return rows
+    if first_error is None:
+        return rows
+    relaxed_rows = parse_relaxed_jsonl_rows(value)
+    if relaxed_rows:
+        return relaxed_rows
+    line_number, exc = first_error
+    raise ValueError(
+        f"provider returned invalid JSONL at line {line_number}: {exc}; "
+        f"preview={safe_preview(value)}"
+    ) from exc
 
 
 def repair_translated_row_structure(source_html: str, translated_html: str) -> str:

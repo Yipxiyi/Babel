@@ -677,6 +677,34 @@ class JobEngineTests(unittest.TestCase):
             ],
         )
 
+    def test_provider_parser_recovers_malformed_xhtml_attribute_quotes(self) -> None:
+        rows = parse_translated_rows(
+            '{"id":"a::0001","translated_html":"<p class="indent">第一段</p>"}\n'
+            '{"id":"a::0002","translated_html":"<p><img alt="" src="cover.jpg" /></p>"}'
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                {"id": "a::0001", "translated_html": '<p class="indent">第一段</p>'},
+                {"id": "a::0002", "translated_html": '<p><img alt="" src="cover.jpg" /></p>'},
+            ],
+        )
+
+    def test_provider_parser_recovers_prefixed_relaxed_rows(self) -> None:
+        rows = parse_translated_rows(
+            'jsonl {"id":"a::0001","translated_html":"<p class="indent">第一段</p>"} '
+            '{"id":"a::0002","translated_html":"<p>第二段</p>"}'
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                {"id": "a::0001", "translated_html": '<p class="indent">第一段</p>'},
+                {"id": "a::0002", "translated_html": "<p>第二段</p>"},
+            ],
+        )
+
     def test_repair_translated_row_structure_restores_missing_anchor(self) -> None:
         repaired = repair_translated_row_structure(
             '<p class="indent">Before <a id="page12" class="calibre6" />after.</p>',
