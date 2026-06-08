@@ -214,10 +214,12 @@ const dictionaries = {
     state: "State",
     saveGlossary: "Save glossary table",
     addTerm: "Add term",
+    approveAllTerms: "Approve all",
     noTerms: "Prepare a job to review glossary candidates.",
     reviewGlossary: "Review Glossary",
     aiFillTranslations: "AI Fill Translations",
     aiFillingTranslations: "AI filling...",
+    aiFillingProgress: "Drafting glossary translations with the configured provider.",
     glossarySummaryTitle: "Glossary readiness",
     glossarySummaryHint: "AI drafts fill blank pending translations first; approve the terms you want locked before translation.",
     approved: "Approved",
@@ -350,10 +352,12 @@ const dictionaries = {
     state: "状态",
     saveGlossary: "保存术语表",
     addTerm: "新增术语",
+    approveAllTerms: "一键全部审查",
     noTerms: "准备任务后可审查术语候选项。",
     reviewGlossary: "审查术语表",
     aiFillTranslations: "AI 补全译名",
     aiFillingTranslations: "AI 补全中...",
+    aiFillingProgress: "正在调用已配置的 provider 生成术语译名草稿。",
     glossarySummaryTitle: "术语表就绪状态",
     glossarySummaryHint: "AI 会先补齐 pending 空译名；真正需要全书一致的术语，请审查后设为 approved。",
     approved: "已确认",
@@ -775,6 +779,14 @@ function App() {
     setTerms((previous) => previous.map((term, current) => (current === index ? { ...term, ...patch } : term)));
   }
 
+  function approveAllTerms() {
+    setTerms((previous) =>
+      previous.map((term) =>
+        term.status === "ignored" ? term : { ...term, status: "approved", locked: true },
+      ),
+    );
+  }
+
   function addTerm() {
     setTerms((previous) => [
       {
@@ -950,6 +962,7 @@ function App() {
           onStatusFilter={setStatusFilter}
           onUpdateTerm={updateTerm}
           onAddTerm={addTerm}
+          onApproveAll={approveAllTerms}
           onSave={() => void handleSaveGlossary()}
         />
       ) : null}
@@ -1157,17 +1170,29 @@ function GlossarySummary({
           </h3>
           <p className="mt-1 max-w-[62ch] text-sm leading-relaxed text-muted">{t.glossarySummaryHint}</p>
         </div>
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <Button type="button" variant="ghost" disabled={!canReview} onClick={onReview}>
+        <div className="flex w-full flex-col gap-2 sm:w-56">
+          <Button className="w-full whitespace-nowrap" type="button" variant="ghost" disabled={!canReview} onClick={onReview}>
             <Table size={18} weight="bold" />
             {t.reviewGlossary}
           </Button>
-          <Button type="button" variant="secondary" disabled={!canAutofill || isAutofilling} onClick={onAutofill}>
-            <ArrowClockwise size={18} weight="bold" />
+          <Button className="w-full whitespace-nowrap" type="button" variant="secondary" disabled={!canAutofill || isAutofilling} onClick={onAutofill}>
+            <ArrowClockwise className={cn(isAutofilling && "animate-spin")} size={18} weight="bold" />
             {isAutofilling ? t.aiFillingTranslations : t.aiFillTranslations}
           </Button>
         </div>
       </div>
+      {isAutofilling ? (
+        <div className="mt-4 rounded-2xl border border-clay/30 bg-clay/8 px-4 py-3" role="status" aria-live="polite">
+          <div className="flex items-center justify-between gap-4 text-sm">
+            <span className="font-bold text-ink">{t.aiFillingTranslations}</span>
+            <span className="font-mono text-[0.68rem] uppercase tracking-[0.14em] text-clay">working</span>
+          </div>
+          <div className="autofill-progress mt-3 h-2 overflow-hidden rounded-full bg-paper" aria-label={t.aiFillingProgress}>
+            <div className="autofill-progress-fill h-full rounded-full bg-clay" />
+          </div>
+          <p className="mt-2 text-xs leading-relaxed text-muted">{t.aiFillingProgress}</p>
+        </div>
+      ) : null}
       <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-5">
         <Metric label="Total" value={String(stats.total)} />
         <Metric label={t.approved} value={String(stats.approved)} />
@@ -1193,6 +1218,7 @@ function GlossaryModal({
   onStatusFilter,
   onUpdateTerm,
   onAddTerm,
+  onApproveAll,
   onSave,
 }: {
   t: (typeof dictionaries)[Locale];
@@ -1208,6 +1234,7 @@ function GlossaryModal({
   onStatusFilter: (value: string) => void;
   onUpdateTerm: (index: number, patch: Partial<GlossaryTerm>) => void;
   onAddTerm: () => void;
+  onApproveAll: () => void;
   onSave: () => void;
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -1215,24 +1242,24 @@ function GlossaryModal({
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-ink/45 px-4 py-6 backdrop-blur-sm" onMouseDown={onClose}>
       <div role="dialog" aria-modal="true" aria-labelledby="glossary-title" className="max-h-[88dvh] w-full max-w-6xl overflow-y-auto rounded-2xl border border-ink/15 bg-paper p-5 shadow-modal" onMouseDown={(event) => event.stopPropagation()}>
-        <ModalHeader id="glossary-title" title={t.glossaryTitle} subtitle={t.glossaryHint} closeLabel={t.close} closeRef={closeRef} onClose={onClose} />
-        <div className="mt-5">
-          <GlossaryTable
-            t={t}
-            terms={terms}
-            search={search}
-            typeFilter={typeFilter}
-            statusFilter={statusFilter}
-            canSave={canSave}
-            isSaving={isSaving}
-            onSearch={onSearch}
-            onTypeFilter={onTypeFilter}
-            onStatusFilter={onStatusFilter}
-            onUpdateTerm={onUpdateTerm}
-            onAddTerm={onAddTerm}
-            onSave={onSave}
-          />
-        </div>
+        <GlossaryTable
+          t={t}
+          terms={terms}
+          search={search}
+          typeFilter={typeFilter}
+          statusFilter={statusFilter}
+          canSave={canSave}
+          isSaving={isSaving}
+          closeRef={closeRef}
+          onClose={onClose}
+          onSearch={onSearch}
+          onTypeFilter={onTypeFilter}
+          onStatusFilter={onStatusFilter}
+          onUpdateTerm={onUpdateTerm}
+          onAddTerm={onAddTerm}
+          onApproveAll={onApproveAll}
+          onSave={onSave}
+        />
       </div>
     </div>
   );
@@ -1246,11 +1273,14 @@ function GlossaryTable({
   statusFilter,
   canSave,
   isSaving,
+  closeRef,
+  onClose,
   onSearch,
   onTypeFilter,
   onStatusFilter,
   onUpdateTerm,
   onAddTerm,
+  onApproveAll,
   onSave,
 }: {
   t: (typeof dictionaries)[Locale];
@@ -1260,11 +1290,14 @@ function GlossaryTable({
   statusFilter: string;
   canSave: boolean;
   isSaving: boolean;
+  closeRef: React.RefObject<HTMLButtonElement | null>;
+  onClose: () => void;
   onSearch: (value: string) => void;
   onTypeFilter: (value: string) => void;
   onStatusFilter: (value: string) => void;
   onUpdateTerm: (index: number, patch: Partial<GlossaryTerm>) => void;
   onAddTerm: () => void;
+  onApproveAll: () => void;
   onSave: () => void;
 }) {
   const [page, setPage] = useState(1);
@@ -1297,13 +1330,13 @@ function GlossaryTable({
     <div>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <h3 className="flex items-center gap-2 text-lg font-bold tracking-tight">
+          <h2 id="glossary-title" className="flex items-center gap-2 text-lg font-bold tracking-tight">
             <Table size={20} weight="bold" />
             {t.glossaryTitle}
-          </h3>
+          </h2>
           <p className="mt-1 max-w-[62ch] text-sm leading-relaxed text-muted">{t.glossaryHint}</p>
         </div>
-        <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <div className="relative min-w-0 sm:w-64">
             <Input className="pl-10" value={search} placeholder={t.searchTerms} onChange={(event) => onSearch(event.target.value)} />
             <MagnifyingGlass size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" weight="bold" />
@@ -1320,6 +1353,9 @@ function GlossaryTable({
               <option key={status} value={status}>{status}</option>
             ))}
           </Select>
+          <button ref={closeRef} type="button" className="grid size-10 shrink-0 place-items-center rounded-xl border border-ink/15 bg-surface text-ink transition hover:-translate-y-0.5 hover:border-clay/45 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-clay" onClick={onClose} aria-label={t.close}>
+            <X size={18} weight="bold" />
+          </button>
         </div>
       </div>
       <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-ink/10 bg-surface/70 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1391,6 +1427,10 @@ function GlossaryTable({
         )}
       </div>
       <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:justify-end">
+        <Button type="button" variant="ghost" disabled={!canSave || !terms.length} onClick={onApproveAll}>
+          <CheckCircle size={18} weight="bold" />
+          {t.approveAllTerms}
+        </Button>
         <Button type="button" variant="ghost" disabled={!canSave} onClick={onAddTerm}>
           <Plus size={18} weight="bold" />
           {t.addTerm}
@@ -1515,7 +1555,7 @@ function ValidationPanel({ t, job, tone }: { t: (typeof dictionaries)[Locale]; j
       <h3 className="mb-3 text-lg font-bold tracking-tight">{t.validation}</h3>
       <div className="rounded-2xl border border-ink/12 bg-surface p-4">
         <div className="flex items-center gap-4">
-          <div className={cn("grid size-14 place-items-center rounded-full border", tone === "failed" ? "border-danger text-danger" : "border-success text-success")}>
+          <div className={cn("grid size-14 place-items-center rounded-full", tone === "failed" ? "bg-danger/10 text-danger" : "bg-success/10 text-success")}>
             <Icon size={32} weight="bold" />
           </div>
           <div>
