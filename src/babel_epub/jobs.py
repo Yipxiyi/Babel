@@ -702,6 +702,7 @@ class BabelJobEngine:
                 "fixed": 0,
                 "remaining": 0,
                 "blocking_remaining": 0,
+                "nonblocking_remaining": 0,
                 "issues": [],
             }
             path = write_ai_quality_report(pipeline_dir, report)
@@ -749,6 +750,7 @@ class BabelJobEngine:
             if not blocking:
                 break
         blocking_remaining = [issue for issue in remaining if issue.get("kind") == "untranslated-source-term"]
+        nonblocking_remaining = len(remaining) - len(blocking_remaining)
         report = {
             "enabled": True,
             "status": "failed" if blocking_remaining else "passed",
@@ -756,6 +758,7 @@ class BabelJobEngine:
             "fixed": total_fixed,
             "remaining": len(remaining),
             "blocking_remaining": len(blocking_remaining),
+            "nonblocking_remaining": nonblocking_remaining,
             "issues": remaining[:200],
         }
         path = write_ai_quality_report(pipeline_dir, report)
@@ -767,6 +770,7 @@ class BabelJobEngine:
                 "detected": report["detected"],
                 "remaining": report["remaining"],
                 "blocking_remaining": report["blocking_remaining"],
+                "nonblocking_remaining": report["nonblocking_remaining"],
             }
             job.ai_fix_summary = {"fixed": total_fixed, "rounds": 2 if remaining else 1}
             message = (

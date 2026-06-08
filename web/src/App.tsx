@@ -81,7 +81,12 @@ type BabelJob = {
   events?: JobEvent[];
   errors?: string[];
   ai_qa_status?: string;
-  ai_qa_summary?: { detected?: number; remaining?: number; blocking_remaining?: number };
+  ai_qa_summary?: {
+    detected?: number;
+    remaining?: number;
+    blocking_remaining?: number;
+    nonblocking_remaining?: number;
+  };
   ai_fix_summary?: { fixed?: number; rounds?: number };
   glossary_summary?: { total?: number; approved?: number; pending?: number; ignored?: number };
   generated_title?: string;
@@ -255,7 +260,7 @@ const dictionaries = {
     validationPending: "Waiting for translated output",
     validationFailed: "Needs attention",
     fixedRows: "Fixed rows",
-    remainingIssues: "Remaining issues",
+    remainingIssues: "Blocking issues",
     start: "Start Translation",
     resume: "Resume Translation",
     refreshJob: "Refresh Job",
@@ -391,7 +396,7 @@ const dictionaries = {
     validationPending: "等待翻译输出",
     validationFailed: "需要处理",
     fixedRows: "已修复行数",
-    remainingIssues: "剩余问题",
+    remainingIssues: "阻塞问题",
     start: "开始翻译",
     resume: "继续翻译",
     refreshJob: "刷新任务",
@@ -1504,7 +1509,7 @@ function DownloadsPanel({ t, jobId, canDownloadOutput, canDownloadGlossary }: { 
 function ValidationPanel({ t, job, tone }: { t: (typeof dictionaries)[Locale]; job: BabelJob | null; tone: Tone }) {
   const Icon = tone === "failed" ? WarningCircle : CheckCircle;
   const fixed = job?.ai_fix_summary?.fixed ?? 0;
-  const remaining = job?.ai_qa_summary?.remaining ?? 0;
+  const blockingRemaining = job?.ai_qa_summary?.blocking_remaining ?? job?.ai_qa_summary?.remaining ?? 0;
   return (
     <div className="mt-6 border-t border-ink/12 pt-5">
       <h3 className="mb-3 text-lg font-bold tracking-tight">{t.validation}</h3>
@@ -1522,7 +1527,11 @@ function ValidationPanel({ t, job, tone }: { t: (typeof dictionaries)[Locale]; j
           <ValidationRow label={t.structuralValidation} value={tone === "completed" ? t.validationReady : tone === "failed" ? t.validationFailed : t.validationPending} tone={tone} />
           <ValidationRow label={t.aiQuality} value={job?.ai_qa_status || "pending"} tone={job?.ai_qa_status === "failed" ? "failed" : tone === "completed" ? "completed" : "idle"} />
           <ValidationRow label={t.fixedRows} value={String(fixed)} tone={fixed > 0 ? "completed" : "idle"} />
-          <ValidationRow label={t.remainingIssues} value={String(remaining)} tone={remaining > 0 ? "failed" : "completed"} />
+          <ValidationRow
+            label={t.remainingIssues}
+            value={String(blockingRemaining)}
+            tone={blockingRemaining > 0 ? "failed" : "completed"}
+          />
         </div>
       </div>
     </div>

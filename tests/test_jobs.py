@@ -194,6 +194,43 @@ class JobEngineTests(unittest.TestCase):
                 chapter = archive.read("OEBPS/chapter1.xhtml").decode("utf-8")
             self.assertIn("测试翻译", chapter)
 
+    def test_ai_qa_summary_separates_nonblocking_locked_translation_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: FakeProvider())
+            job = engine.create_job(
+                JobRequest(filename="input.epub", content=input_epub.read_bytes(), target_language="Simplified Chinese")
+            )
+            engine.update_glossary_terms(
+                job.job_id,
+                [
+                    {
+                        "source": "Hello",
+                        "translation": "你好",
+                        "type": "term",
+                        "aliases": [],
+                        "frequency": 1,
+                        "evidence": [],
+                        "status": "approved",
+                        "confidence": 0.95,
+                        "locked": True,
+                    }
+                ],
+            )
+
+            finished = engine.run_job(
+                job.job_id,
+                ProviderSettings(provider="fake", model="fake-model", target_language="Simplified Chinese"),
+            )
+
+            self.assertEqual(finished.status, "completed")
+            self.assertEqual(finished.ai_qa_status, "passed")
+            self.assertEqual(finished.ai_qa_summary["blocking_remaining"], 0)
+            self.assertEqual(finished.ai_qa_summary["nonblocking_remaining"], 1)
+            self.assertEqual(finished.ai_qa_summary["remaining"], 1)
+
     def test_failed_job_records_events_and_failed_batch(self) -> None:
         class FailOnSecondBatchProvider(FakeProvider):
             def __init__(self) -> None:
