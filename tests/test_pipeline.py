@@ -8,10 +8,12 @@ from argparse import Namespace
 from pathlib import Path
 
 from babel_epub.pipeline import (
+    classify_doc,
     command_apply,
     command_audit,
     command_prepare,
     command_validate_batches,
+    extract_name_candidates,
     read_jsonl,
     write_jsonl,
 )
@@ -92,6 +94,11 @@ def make_minimal_epub(path: Path) -> None:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_classify_doc_accepts_chapter_titles_with_suffixes(self) -> None:
+        self.assertEqual(classify_doc("Chapter 1"), "chapter")
+        self.assertEqual(classify_doc("Chapter 1 - THE GREAT STORM CHAMBER LIBRARY"), "chapter")
+        self.assertEqual(classify_doc("Chapter 12: The Road"), "chapter")
+
     def test_prepare_validate_apply_and_audit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -180,6 +187,142 @@ class PipelineTests(unittest.TestCase):
                 command_validate_batches(Namespace(pipeline_dir=work_dir / "pipeline"))
             report = json.loads((work_dir / "pipeline" / "batch_validation.json").read_text(encoding="utf-8"))
             self.assertGreaterEqual(report["issue_count"], 2)
+
+    def test_name_candidates_reuse_glossary_noise_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pipeline_dir = Path(tmp)
+            write_jsonl(
+                pipeline_dir / "blocks.jsonl",
+                [
+                    {"id": "chapter.xhtml::0001", "source_text": "Logan met Grace. Yeah, Okay, Dad, Where."},
+                    {"id": "chapter.xhtml::0002", "source_text": "Grace called Logan. Fuck, God, Twitter, Not."},
+                    {"id": "chapter.xhtml::0003", "source_text": "Logan found Grace on Friday. Because, Which, Coach, Jesus."},
+                    {"id": "chapter.xhtml::0004", "source_text": "Logan’s grin met Grace’s laugh."},
+                    {
+                        "id": "chapter.xhtml::0005",
+                        "source_text": "Because. Which. Coach. Jesus. Where. Not. Friday. Logan’s Grace’s. Hell. Once. Oh God. T-shirt.",
+                    },
+                    {"id": "chapter.xhtml::0006", "source_text": "Hell. Once. Oh God. T-shirt."},
+                    {
+                        "id": "chapter.xhtml::0007",
+                        "source_text": "From. Its. Each. Despite. Quickly. Slowly. Welcome. Stay. Far. Time. No-one. Aargh. Urrgh. Wuh-wuh. The Skyraider.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0008",
+                        "source_text": "From. Its. Each. Despite. Quickly. Slowly. Welcome. Stay. Far. Time. No-one. Aargh. Urrgh. Wuh-wuh. The Skyraider.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0009",
+                        "source_text": "Several. Around. Pass. Steady. More. Fare. Believe. Fifty. Study. Stop. Aye. Darkness.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0010",
+                        "source_text": "Several. Around. Pass. Steady. More. Fare. Believe. Fifty. Study. Stop. Aye. Darkness.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0011",
+                        "source_text": "Apart. Dead. Ever. Flying. Loom. Sometimes. Wahoo.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0012",
+                        "source_text": "Apart. Dead. Ever. Flying. Loom. Sometimes. Wahoo.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0013",
+                        "source_text": "Beneath. Delicious. Help. Looking.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0014",
+                        "source_text": "Beneath. Delicious. Help. Looking.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0015",
+                        "source_text": "Heart. Leave. Nor.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0016",
+                        "source_text": "Heart. Leave. Nor.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0017",
+                        "source_text": "Down.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0018",
+                        "source_text": "Down.",
+                    },
+                ],
+            )
+
+            rows = extract_name_candidates(pipeline_dir, min_count=2)
+            by_term = {row["term"]: row for row in rows}
+
+            self.assertIn("Logan", by_term)
+            self.assertIn("Grace", by_term)
+            self.assertEqual(by_term["Logan"]["count"], 4)
+            self.assertEqual(by_term["Grace"]["count"], 4)
+            self.assertNotIn("Logan’s", by_term)
+            self.assertNotIn("Grace’s", by_term)
+            for noise in (
+                "Because",
+                "Apart",
+                "Around",
+                "Aye",
+                "Believe",
+                "Beneath",
+                "Coach",
+                "Dad",
+                "Darkness",
+                "Dead",
+                "Delicious",
+                "Despite",
+                "Down",
+                "Each",
+                "Ever",
+                "Fare",
+                "Far",
+                "Fifty",
+                "Flying",
+                "Friday",
+                "From",
+                "Fuck",
+                "God",
+                "Heart",
+                "Help",
+                "Hell",
+                "Jesus",
+                "Its",
+                "Leave",
+                "Looking",
+                "Loom",
+                "More",
+                "Not",
+                "No-one",
+                "Nor",
+                "Oh God",
+                "Okay",
+                "Once",
+                "Pass",
+                "Quickly",
+                "Several",
+                "Slowly",
+                "Sometimes",
+                "Stay",
+                "Steady",
+                "Stop",
+                "Study",
+                "T-shirt",
+                "The Skyraider",
+                "Time",
+                "Twitter",
+                "Wahoo",
+                "Welcome",
+                "Where",
+                "Which",
+                "Wuh-wuh",
+                "Yeah",
+            ):
+                self.assertNotIn(noise, by_term)
 
 
 if __name__ == "__main__":

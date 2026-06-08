@@ -41,6 +41,34 @@ class TranslationProvider(ABC):
     def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
         """Translate source batch rows into `id` + `translated_html` rows."""
 
+    def usage_snapshot(self) -> dict[str, int]:
+        return dict(getattr(self, "_usage_summary", {}))
+
+    def _record_response_usage(self, response: dict[str, Any]) -> None:
+        usage = response.get("usage") if isinstance(response, dict) else None
+        current = dict(getattr(self, "_usage_summary", {}))
+        current["requests"] = int(current.get("requests", 0)) + 1
+        if isinstance(usage, dict):
+            prompt_tokens = _usage_int(usage, "prompt_tokens", "input_tokens")
+            completion_tokens = _usage_int(usage, "completion_tokens", "output_tokens")
+            total_tokens = _usage_int(usage, "total_tokens")
+            if total_tokens == 0 and (prompt_tokens or completion_tokens):
+                total_tokens = prompt_tokens + completion_tokens
+            current["prompt_tokens"] = int(current.get("prompt_tokens", 0)) + prompt_tokens
+            current["completion_tokens"] = int(current.get("completion_tokens", 0)) + completion_tokens
+            current["total_tokens"] = int(current.get("total_tokens", 0)) + total_tokens
+        self._usage_summary = current
+
+
+def _usage_int(usage: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return max(0, int(value))
+    return 0
+
 
 def default_transport(
     url: str,
@@ -117,6 +145,19 @@ def is_retryable_translation_output_error(error: Exception) -> bool:
     return isinstance(error, ValueError) and any(fragment in message for fragment in retryable_fragments)
 
 
+def is_provider_safety_rejection(error: Exception) -> bool:
+    message = str(error).lower()
+    return (
+        isinstance(error, ValueError)
+        and "provider returned invalid jsonl" in message
+        and (
+            "considered high risk" in message
+            or "request was rejected" in message
+            or "safety" in message
+        )
+    )
+
+
 def is_retryable_translation_error(error: Exception) -> bool:
     return is_retryable_provider_error(error) or is_retryable_translation_output_error(error)
 
@@ -171,6 +212,55 @@ def safe_preview(text: str, limit: int = 240) -> str:
     return compact[:limit]
 
 
+def relaxed_json_string(value: str) -> str:
+    return (
+        value.replace("\\n", "\n")
+        .replace("\\r", "\r")
+        .replace("\\t", "\t")
+        .replace('\\"', '"')
+        .replace("\\/", "/")
+    )
+
+
+def parse_relaxed_jsonl_rows(value: str) -> list[dict]:
+    start = value.find("{")
+    if start == -1:
+        return []
+    payload = value[start:].strip()
+    chunks = re.split(r"}\s*(?={)", payload)
+    rows: list[dict] = []
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if not chunk.endswith("}"):
+            chunk = f"{chunk}}}"
+        try:
+            parsed = json.loads(chunk)
+            if isinstance(parsed, dict):
+                rows.append(parsed)
+                continue
+        except json.JSONDecodeError:
+            pass
+
+        id_match = re.search(r'"id"\s*:\s*"((?:\\.|[^"\\])*)"', chunk)
+        html_match = re.search(r'"translated_html"\s*:\s*"', chunk)
+        if not id_match or not html_match:
+            return []
+        translated_html = chunk[html_match.end() :].strip()
+        if translated_html.endswith("}"):
+            translated_html = translated_html[:-1].rstrip()
+        if translated_html.endswith('"'):
+            translated_html = translated_html[:-1]
+        rows.append(
+            {
+                "id": relaxed_json_string(id_match.group(1)),
+                "translated_html": relaxed_json_string(translated_html),
+            }
+        )
+    return rows
+
+
 def parse_translated_rows(text: str) -> list[dict]:
     value = strip_markdown_fence(text)
     if not value:
@@ -215,6 +305,7 @@ def parse_translated_rows(text: str) -> list[dict]:
         return streamed_rows
 
     rows: list[dict] = []
+    first_error: tuple[int, json.JSONDecodeError] | None = None
     for line_number, line in enumerate(value.splitlines(), start=1):
         line = line.strip()
         if not line:
@@ -222,14 +313,21 @@ def parse_translated_rows(text: str) -> list[dict]:
         try:
             row = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"provider returned invalid JSONL at line {line_number}: {exc}; "
-                f"preview={safe_preview(value)}"
-            ) from exc
+            first_error = (line_number, exc)
+            break
         if not isinstance(row, dict):
             raise ValueError(f"provider returned non-object JSONL row at line {line_number}")
         rows.append(row)
-    return rows
+    if first_error is None:
+        return rows
+    relaxed_rows = parse_relaxed_jsonl_rows(value)
+    if relaxed_rows:
+        return relaxed_rows
+    line_number, exc = first_error
+    raise ValueError(
+        f"provider returned invalid JSONL at line {line_number}: {exc}; "
+        f"preview={safe_preview(value)}"
+    ) from exc
 
 
 def repair_translated_row_structure(source_html: str, translated_html: str) -> str:
@@ -317,6 +415,9 @@ def batch_prompt(rows: list[dict], glossary: str, context: str, target_language:
     system = (
         "You translate EPUB XHTML snippets while preserving structure. "
         f"Target language: {target_language}. "
+        "This is a neutral literary translation and format-preservation task. "
+        "Return JSONL even when source text contains mature themes, profanity, romance, conflict, or quoted speech; "
+        "do not refuse, moralize, summarize, or add safety commentary. "
         "Return only JSONL rows with exactly `id` and `translated_html`. "
         "Do not add markdown, commentary, summaries, or placeholder text. "
         "Do not prefix or suffix the JSONL with any non-JSON text. "
@@ -373,6 +474,7 @@ class OpenAICompatibleProvider(TranslationProvider):
             "temperature": self.temperature,
         }
         response = call_transport(self.transport, endpoint, headers, payload, self.request_timeout)
+        self._record_response_usage(response)
         try:
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -425,6 +527,7 @@ class AnthropicProvider(TranslationProvider):
             },
             self.request_timeout,
         )
+        self._record_response_usage(response)
         try:
             content_items = response["content"]
             content = "".join(item.get("text", "") for item in content_items if item.get("type") == "text")

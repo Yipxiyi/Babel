@@ -28,7 +28,7 @@ Most quick ebook translation scripts flatten a book into text and destroy the re
 
 - Preserves chapter files, spine order, CSS, images, links, anchors, IDs, and inline emphasis.
 - Extracts only human-readable XHTML blocks into JSONL batches.
-- Generates a glossary scaffold and worker instructions before translation begins.
+- Generates a glossary scaffold, drafts missing term translations when a Web provider is configured, and creates worker instructions before translation begins.
 - Validates each translated batch before it can be applied.
 - Runs Web translations with configurable batch concurrency, timeout, retries, and failed-job resume.
 - Rejects common fake/placeholder translations such as `第 N 段译文`.
@@ -75,7 +75,7 @@ Open:
 http://127.0.0.1:7860
 ```
 
-The Web UI lets you upload an ebook, choose the final output format, review/edit the glossary, configure an API provider, choose concurrency/timeout/retry settings, watch terminal-style progress, resume failed jobs, and download the translated book plus report.
+The Web UI lets you upload an ebook, choose the final output format, auto-draft missing glossary translations with a configured provider, review/edit the glossary in a modal, choose concurrency/timeout/retry settings, watch terminal-style progress, resume failed jobs, and download the translated book plus report.
 
 The top-right `Guide` button opens the recommended operation flow. The language toggle supports English and Simplified Chinese and is saved in `localStorage`.
 
@@ -249,13 +249,14 @@ babel-epub report \
 
 1. Run `prepare`.
 2. Review `name_candidates.json`.
-3. Fill `translation_glossary.md` with stable name and term decisions.
-4. Main agent maintains `translation_context.md`.
-5. Dispatch batch workers with `WORKER_INSTRUCTIONS.md`, the glossary, and relevant prior context.
-6. Require every worker to run `validate-batch`.
-7. Main agent runs `validate-batches`.
-8. Run `apply`, then `audit`.
-9. Scan the final book and intermediate EPUB for placeholder text and long untranslated passages.
+3. Let AI draft missing glossary translations when a provider is configured.
+4. Review the glossary, approve stable name and term decisions, and ignore noise.
+5. Main agent maintains `translation_context.md`.
+6. Dispatch batch workers with `WORKER_INSTRUCTIONS.md`, the glossary, and relevant prior context.
+7. Require every worker to run `validate-batch`.
+8. Main agent runs `validate-batches`.
+9. Run `apply`, then `audit`.
+10. Scan the final book and intermediate EPUB for placeholder text and long untranslated passages.
 
 See [docs/CODEX_WORKFLOW.md](docs/CODEX_WORKFLOW.md) for the multi-agent operating model.
 

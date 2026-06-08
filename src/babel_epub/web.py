@@ -121,6 +121,9 @@ class BabelWebHandler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "glossary":
             self._update_glossary(parts[2])
             return
+        if len(parts) == 5 and parts[:2] == ["api", "jobs"] and parts[3:] == ["glossary-terms", "autofill"]:
+            self._autofill_glossary_terms(parts[2])
+            return
         if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "start":
             self._start_job(parts[2])
             return
@@ -217,6 +220,52 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "job not found")
             return
         self._send_json({"job": job.to_dict(include_paths=False), "glossary": content})
+
+    def _autofill_glossary_terms(self, job_id: str) -> None:
+        try:
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8")
+            data = json.loads(body) if body.strip() else {}
+            stored_settings = _read_provider_settings(self.engine.data_dir)
+            merged_data = _merge_provider_settings(data, stored_settings)
+            before_terms = self.engine.read_glossary_terms(job_id)
+            before_empty = {
+                term.get("source")
+                for term in before_terms
+                if term.get("status") == "pending" and not str(term.get("translation", "")).strip()
+            }
+            job = self.engine.autofill_glossary_terms(
+                job_id,
+                ProviderSettings(
+                    provider=merged_data.get("provider", "openai-compatible"),
+                    base_url=merged_data.get("base_url", ""),
+                    api_key=merged_data.get("api_key", ""),
+                    model=merged_data.get("model", ""),
+                    target_language=merged_data.get("target_language", "Simplified Chinese"),
+                    temperature=float(merged_data.get("temperature", 0.2)),
+                    request_timeout=normalize_request_timeout(
+                        merged_data.get("request_timeout", DEFAULT_REQUEST_TIMEOUT)
+                    ),
+                    max_retries=normalize_max_retries(merged_data.get("max_retries", DEFAULT_MAX_RETRIES)),
+                    max_concurrency=normalize_max_concurrency(
+                        merged_data.get("max_concurrency", DEFAULT_MAX_CONCURRENCY)
+                    ),
+                ),
+            )
+            updated = self.engine.read_glossary_terms(job_id)
+            filled = len(
+                [
+                    term
+                    for term in updated
+                    if term.get("source") in before_empty and str(term.get("translation", "")).strip()
+                ]
+            )
+        except KeyError:
+            self.send_error(HTTPStatus.NOT_FOUND, "job not found")
+            return
+        except (ValueError, json.JSONDecodeError, RuntimeError, TimeoutError, OSError) as exc:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        self._send_json({"job": job.to_dict(include_paths=False), "glossary_terms": updated, "filled": filled})
 
     def _start_job(self, job_id: str) -> None:
         try:

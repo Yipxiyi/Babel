@@ -42,6 +42,7 @@ from .providers import (
     normalize_max_concurrency,
     normalize_max_retries,
     repair_translated_rows_structure,
+    is_provider_safety_rejection,
     validate_provider_settings,
 )
 
@@ -49,6 +50,7 @@ from .providers import (
 ProviderFactory = Callable[[ProviderSettings], TranslationProvider]
 MAX_EVENTS = 500
 DEFAULT_MAX_BLOCKS = 20
+GLOSSARY_AUTOFILL_BATCH_SIZE = 40
 
 
 def utc_now() -> str:
@@ -143,6 +145,7 @@ class BabelJob:
     ai_qa_summary: dict = field(default_factory=dict)
     ai_fix_summary: dict = field(default_factory=dict)
     glossary_summary: dict = field(default_factory=dict)
+    usage_summary: dict = field(default_factory=dict)
     generated_title: str = ""
     title_source: str = "manual"
 
@@ -248,6 +251,7 @@ class BabelJobEngine:
             ai_qa_summary=dict(data.get("ai_qa_summary") or {}),
             ai_fix_summary=dict(data.get("ai_fix_summary") or {}),
             glossary_summary=dict(data.get("glossary_summary") or {}),
+            usage_summary=dict(data.get("usage_summary") or {}),
             generated_title=data.get("generated_title", ""),
             title_source=data.get("title_source", "manual"),
         )
@@ -295,6 +299,25 @@ class BabelJobEngine:
             active for active in job.active_batches if int(active.get("batch", -1)) != batch_number
         ]
         self._set_active_current(job)
+
+    def _record_provider_usage(self, job_id: str, provider: TranslationProvider, scope: str) -> None:
+        usage = provider.usage_snapshot()
+        if not usage:
+            return
+
+        def mutate(job: BabelJob) -> None:
+            current = dict(job.usage_summary or {})
+            for key in ("requests", "prompt_tokens", "completion_tokens", "total_tokens"):
+                current[key] = int(current.get(key, 0)) + int(usage.get(key, 0))
+            by_scope = dict(current.get("by_scope") or {})
+            scoped = dict(by_scope.get(scope) or {})
+            for key in ("requests", "prompt_tokens", "completion_tokens", "total_tokens"):
+                scoped[key] = int(scoped.get(key, 0)) + int(usage.get(key, 0))
+            by_scope[scope] = scoped
+            current["by_scope"] = by_scope
+            job.usage_summary = current
+
+        self._mutate_job(job_id, mutate)
 
     def _start_batch(self, job_id: str, batch: dict, attempt: int) -> None:
         summary = batch_summary(batch)
@@ -479,6 +502,65 @@ class BabelJobEngine:
         self._append_event(job, "glossary", "Structured glossary terms updated.")
         return self._set_job(job)
 
+    def autofill_glossary_terms(self, job_id: str, settings: ProviderSettings) -> BabelJob:
+        validate_provider_settings(settings)
+        provider = self.provider_factory(settings)
+        job = self.get_job(job_id)
+        terms = self.read_glossary_terms(job_id)
+        candidates = [
+            (index, term)
+            for index, term in enumerate(terms)
+            if str(term.get("status", "pending")) == "pending"
+            and not str(term.get("translation", "")).strip()
+            and str(term.get("source", "")).strip()
+        ]
+        filled = 0
+        glossary = render_glossary_markdown(job.target_language, terms)
+        context = (
+            "Translate glossary term candidates into concise, reusable target-language terms. "
+            "For names, provide a natural transliteration. For places, species, titles, and recurring terms, "
+            "provide a short stable translation. Return only the translated XHTML rows."
+        )
+        for offset in range(0, len(candidates), GLOSSARY_AUTOFILL_BATCH_SIZE):
+            batch = candidates[offset : offset + GLOSSARY_AUTOFILL_BATCH_SIZE]
+            rows = [
+                {
+                    "id": f"glossary-term::{index}",
+                    "source_text": str(term.get("source", "")),
+                    "source_html": f"<p>{escape(str(term.get('source', '')))}</p>",
+                }
+                for index, term in batch
+            ]
+            translated_rows = provider.translate_batch(rows, glossary=glossary, context=context)
+            translated_by_id = {str(row.get("id", "")): row for row in translated_rows}
+            for index, term in batch:
+                row = translated_by_id.get(f"glossary-term::{index}")
+                if not row:
+                    continue
+                translation = html_text(str(row.get("translated_html", ""))).strip()
+                if not translation:
+                    continue
+                if str(term.get("status", "pending")) != "pending" or str(term.get("translation", "")).strip():
+                    continue
+                term["translation"] = translation
+                term["locked"] = False
+                filled += 1
+        self._record_provider_usage(job_id, provider, "glossary")
+
+        normalized = write_glossary_terms(job.work_dir, terms)
+        job.glossary_path.write_text(
+            render_glossary_markdown(job.target_language, normalized),
+            encoding="utf-8",
+        )
+        job.glossary_summary = glossary_summary(normalized)
+        job.message = (
+            f"AI filled {filled} glossary draft translation{'s' if filled != 1 else ''}."
+            if filled
+            else "No empty pending glossary terms needed AI draft translations."
+        )
+        self._append_event(job, "glossary-autofill", job.message, filled=filled)
+        return self._set_job(job)
+
     def _mark_job_failed(self, job_id: str, error: Exception, batch: dict | None = None) -> BabelJob:
         error_text = str(error)
 
@@ -561,7 +643,17 @@ class BabelJobEngine:
             self._start_batch(job_id, batch, attempt)
             try:
                 provider = self.provider_factory(settings)
-                translated_rows = provider.translate_batch(batch_rows, glossary=glossary, context=context)
+                try:
+                    translated_rows = self._translate_rows_with_safety_fallback(
+                        job_id,
+                        provider,
+                        batch,
+                        batch_rows,
+                        glossary,
+                        context,
+                    )
+                finally:
+                    self._record_provider_usage(job_id, provider, "translation")
                 translated_rows = repair_translated_rows_structure(batch_rows, translated_rows)
                 issues = validate_translation_rows(batch_rows, translated_rows)
                 if issues:
@@ -575,6 +667,51 @@ class BabelJobEngine:
                     attempt = next_attempt
                     continue
                 raise
+
+    def _translate_rows_with_safety_fallback(
+        self,
+        job_id: str,
+        provider: TranslationProvider,
+        batch: dict,
+        rows: list[dict],
+        glossary: str,
+        context: str,
+    ) -> list[dict]:
+        try:
+            return provider.translate_batch(rows, glossary=glossary, context=context)
+        except Exception as exc:
+            if len(rows) <= 1 or not is_provider_safety_rejection(exc):
+                raise
+
+        chunk_size = 1
+
+        def split_event(job: BabelJob) -> None:
+            self._append_event(
+                job,
+                "batch-split",
+                (
+                    f"Provider rejected batch {batch['batch']} as high risk; "
+                    f"retrying {len(rows)} rows in chunks of {chunk_size}."
+                ),
+                batch=batch,
+                chunk_size=chunk_size,
+                row_count=len(rows),
+            )
+
+        self._mutate_job(job_id, split_event)
+        translated: list[dict] = []
+        for offset in range(0, len(rows), chunk_size):
+            translated.extend(
+                self._translate_rows_with_safety_fallback(
+                    job_id,
+                    provider,
+                    batch,
+                    rows[offset : offset + chunk_size],
+                    glossary,
+                    context,
+                )
+            )
+        return translated
 
     def _run_ai_quality_checks(
         self,
@@ -590,6 +727,7 @@ class BabelJobEngine:
                 "fixed": 0,
                 "remaining": 0,
                 "blocking_remaining": 0,
+                "nonblocking_remaining": 0,
                 "issues": [],
             }
             path = write_ai_quality_report(pipeline_dir, report)
@@ -637,6 +775,7 @@ class BabelJobEngine:
             if not blocking:
                 break
         blocking_remaining = [issue for issue in remaining if issue.get("kind") == "untranslated-source-term"]
+        nonblocking_remaining = len(remaining) - len(blocking_remaining)
         report = {
             "enabled": True,
             "status": "failed" if blocking_remaining else "passed",
@@ -644,6 +783,7 @@ class BabelJobEngine:
             "fixed": total_fixed,
             "remaining": len(remaining),
             "blocking_remaining": len(blocking_remaining),
+            "nonblocking_remaining": nonblocking_remaining,
             "issues": remaining[:200],
         }
         path = write_ai_quality_report(pipeline_dir, report)
@@ -655,6 +795,7 @@ class BabelJobEngine:
                 "detected": report["detected"],
                 "remaining": report["remaining"],
                 "blocking_remaining": report["blocking_remaining"],
+                "nonblocking_remaining": report["nonblocking_remaining"],
             }
             job.ai_fix_summary = {"fixed": total_fixed, "rounds": 2 if remaining else 1}
             message = (
@@ -698,6 +839,7 @@ class BabelJobEngine:
                 glossary=glossary,
                 context="Translate this ebook title naturally. Return only the translated title row.",
             )
+            self._record_provider_usage(job_id, provider, "title")
             generated = html_text(str(translated[0].get("translated_html", ""))).strip()
         except Exception:
             generated = ""
@@ -804,6 +946,7 @@ class BabelJobEngine:
             context = context_path.read_text(encoding="utf-8") if context_path.exists() else ""
             valid_resume_batches = self._valid_resume_batch_numbers(pipeline_dir, manifest) if resume else set()
             max_concurrency = normalize_max_concurrency(settings.max_concurrency)
+            self._mutate_job(job_id, lambda current: setattr(current, "usage_summary", {}))
             self._maybe_generate_title(job_id, settings, provider, glossary, auto_title_enabled)
 
             def start_mutation(job: BabelJob) -> None:

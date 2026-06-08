@@ -12,6 +12,7 @@ from babel_epub.jobs import BabelJobEngine, JobRequest, ProviderSettings
 from babel_epub.providers import (
     FakeProvider,
     OpenAICompatibleProvider,
+    TranslationProvider,
     parse_translated_rows,
     repair_translated_row_structure,
 )
@@ -44,6 +45,115 @@ def make_epub_with_paragraphs(path: Path, paragraph_count: int) -> None:
 
 
 class JobEngineTests(unittest.TestCase):
+    def test_autofill_glossary_terms_only_fills_pending_empty_terms(self) -> None:
+        class GlossaryDraftProvider(TranslationProvider):
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                return [
+                    {"id": row["id"], "translated_html": f"<p>译:{row['source_text']}</p>"}
+                    for row in rows
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: GlossaryDraftProvider())
+            job = engine.create_job(
+                JobRequest(filename="input.epub", content=input_epub.read_bytes(), target_language="Simplified Chinese")
+            )
+            engine.update_glossary_terms(
+                job.job_id,
+                [
+                    {
+                        "source": "Rook",
+                        "translation": "",
+                        "type": "person",
+                        "aliases": [],
+                        "frequency": 7,
+                        "evidence": ["Rook opened the door."],
+                        "status": "pending",
+                        "confidence": 0.62,
+                        "locked": False,
+                    },
+                    {
+                        "source": "Deepwoods",
+                        "translation": "深林",
+                        "type": "place",
+                        "aliases": [],
+                        "frequency": 4,
+                        "evidence": [],
+                        "status": "pending",
+                        "confidence": 0.72,
+                        "locked": False,
+                    },
+                    {
+                        "source": "Twig",
+                        "translation": "",
+                        "type": "person",
+                        "aliases": [],
+                        "frequency": 3,
+                        "evidence": [],
+                        "status": "approved",
+                        "confidence": 0.9,
+                        "locked": True,
+                    },
+                    {
+                        "source": "Mud",
+                        "translation": "",
+                        "type": "special",
+                        "aliases": [],
+                        "frequency": 2,
+                        "evidence": [],
+                        "status": "ignored",
+                        "confidence": 0.2,
+                        "locked": False,
+                    },
+                ],
+            )
+
+            updated = engine.autofill_glossary_terms(
+                job.job_id,
+                ProviderSettings(provider="fake", model="fake-model", target_language="Simplified Chinese"),
+            )
+            terms = {term["source"]: term for term in engine.read_glossary_terms(job.job_id)}
+            markdown = updated.glossary_path.read_text(encoding="utf-8")
+
+            self.assertEqual(terms["Rook"]["translation"], "译:Rook")
+            self.assertEqual(terms["Rook"]["status"], "pending")
+            self.assertFalse(terms["Rook"]["locked"])
+            self.assertEqual(terms["Deepwoods"]["translation"], "深林")
+            self.assertEqual(terms["Twig"]["translation"], "")
+            self.assertEqual(terms["Mud"]["translation"], "")
+            self.assertEqual(updated.glossary_summary["pending"], 2)
+            self.assertIn("Rook -> 译:Rook", markdown)
+            self.assertIn("glossary-autofill", [event["type"] for event in updated.events])
+
+    def test_autofill_provider_settings_error_does_not_fail_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: FakeProvider())
+            job = engine.create_job(
+                JobRequest(filename="input.epub", content=input_epub.read_bytes(), target_language="Simplified Chinese")
+            )
+
+            with self.assertRaisesRegex(ValueError, "api_key is required"):
+                engine.autofill_glossary_terms(
+                    job.job_id,
+                    ProviderSettings(
+                        provider="openai-compatible",
+                        base_url="https://api.openai.com/v1",
+                        api_key="",
+                        model="gpt-4.1",
+                        target_language="Simplified Chinese",
+                    ),
+                )
+
+            current = engine.get_job(job.job_id)
+            self.assertEqual(current.status, "prepared")
+            self.assertNotIn("failed", [event["type"] for event in current.events])
+
     def test_job_engine_runs_full_translation_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -83,6 +193,72 @@ class JobEngineTests(unittest.TestCase):
                 self.assertIsNone(archive.testzip())
                 chapter = archive.read("OEBPS/chapter1.xhtml").decode("utf-8")
             self.assertIn("测试翻译", chapter)
+
+    def test_completed_job_records_provider_usage_summary(self) -> None:
+        class UsageProvider(FakeProvider):
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                self._record_response_usage(
+                    {"usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}}
+                )
+                return super().translate_batch(rows, glossary, context)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: UsageProvider())
+            job = engine.create_job(
+                JobRequest(filename="input.epub", content=input_epub.read_bytes(), target_language="Simplified Chinese")
+            )
+
+            finished = engine.run_job(
+                job.job_id,
+                ProviderSettings(provider="fake", model="fake-model", target_language="Simplified Chinese"),
+            )
+
+            self.assertEqual(finished.status, "completed")
+            self.assertEqual(finished.usage_summary["requests"], 1)
+            self.assertEqual(finished.usage_summary["prompt_tokens"], 11)
+            self.assertEqual(finished.usage_summary["completion_tokens"], 7)
+            self.assertEqual(finished.usage_summary["total_tokens"], 18)
+            self.assertEqual(finished.usage_summary["by_scope"]["translation"]["total_tokens"], 18)
+
+    def test_ai_qa_summary_separates_nonblocking_locked_translation_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: FakeProvider())
+            job = engine.create_job(
+                JobRequest(filename="input.epub", content=input_epub.read_bytes(), target_language="Simplified Chinese")
+            )
+            engine.update_glossary_terms(
+                job.job_id,
+                [
+                    {
+                        "source": "Hello",
+                        "translation": "你好",
+                        "type": "term",
+                        "aliases": [],
+                        "frequency": 1,
+                        "evidence": [],
+                        "status": "approved",
+                        "confidence": 0.95,
+                        "locked": True,
+                    }
+                ],
+            )
+
+            finished = engine.run_job(
+                job.job_id,
+                ProviderSettings(provider="fake", model="fake-model", target_language="Simplified Chinese"),
+            )
+
+            self.assertEqual(finished.status, "completed")
+            self.assertEqual(finished.ai_qa_status, "passed")
+            self.assertEqual(finished.ai_qa_summary["blocking_remaining"], 0)
+            self.assertEqual(finished.ai_qa_summary["nonblocking_remaining"], 1)
+            self.assertEqual(finished.ai_qa_summary["remaining"], 1)
 
     def test_failed_job_records_events_and_failed_batch(self) -> None:
         class FailOnSecondBatchProvider(FakeProvider):
@@ -240,6 +416,52 @@ class JobEngineTests(unittest.TestCase):
 
             self.assertEqual(finished.status, "completed")
             self.assertIn("batch-retry", [event["type"] for event in finished.events])
+
+    def test_provider_safety_rejection_splits_batch_into_smaller_chunks(self) -> None:
+        class RejectLargeBatchProvider(FakeProvider):
+            large_calls = 0
+            single_row_calls = 0
+
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                if len(rows) > 1:
+                    type(self).large_calls += 1
+                    raise ValueError(
+                        "provider returned invalid JSONL: preview=The request was rejected "
+                        "because it was considered high risk"
+                    )
+                type(self).single_row_calls += 1
+                return super().translate_batch(rows, glossary, context)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_epub_with_paragraphs(input_epub, paragraph_count=3)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: RejectLargeBatchProvider())
+            job = engine.create_job(
+                JobRequest(
+                    filename="input.epub",
+                    content=input_epub.read_bytes(),
+                    target_language="Simplified Chinese",
+                    max_blocks=10,
+                )
+            )
+
+            finished = engine.run_job(
+                job.job_id,
+                ProviderSettings(
+                    provider="fake",
+                    model="fake-model",
+                    target_language="Simplified Chinese",
+                    max_concurrency=1,
+                    max_retries=0,
+                ),
+            )
+
+            self.assertEqual(finished.status, "completed")
+            self.assertEqual(finished.completed_batches, 1)
+            self.assertEqual(RejectLargeBatchProvider.large_calls, 1)
+            self.assertEqual(RejectLargeBatchProvider.single_row_calls, 4)
+            self.assertIn("batch-split", [event["type"] for event in finished.events])
 
     def test_max_concurrency_limits_parallel_batch_execution(self) -> None:
         class SlowCountingProvider(FakeProvider):
@@ -480,7 +702,8 @@ class JobEngineTests(unittest.TestCase):
                             "content": '{"id":"a::0001","translated_html":"<p>你好</p>"}\n'
                         }
                     }
-                ]
+                ],
+                "usage": {"prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18},
             }
 
         provider = OpenAICompatibleProvider(
@@ -499,7 +722,10 @@ class JobEngineTests(unittest.TestCase):
         self.assertEqual(captured["url"], "https://api.example.test/v1/chat/completions")
         self.assertEqual(captured["headers"]["Authorization"], "Bearer secret")
         self.assertEqual(captured["payload"]["model"], "demo-model")
+        self.assertIn("neutral literary translation", captured["payload"]["messages"][0]["content"])
+        self.assertIn("Return JSONL even when source text contains mature themes", captured["payload"]["messages"][0]["content"])
         self.assertEqual(rows, [{"id": "a::0001", "translated_html": "<p>你好</p>"}])
+        self.assertEqual(provider.usage_snapshot()["total_tokens"], 18)
 
     def test_invalid_provider_jsonl_reports_safe_preview(self) -> None:
         with self.assertRaisesRegex(ValueError, "preview=not json"):
@@ -516,6 +742,34 @@ class JobEngineTests(unittest.TestCase):
             [
                 {"id": "a::0001", "translated_html": "<p>你好</p>"},
                 {"id": "a::0002", "translated_html": "<p>世界</p>"},
+            ],
+        )
+
+    def test_provider_parser_recovers_malformed_xhtml_attribute_quotes(self) -> None:
+        rows = parse_translated_rows(
+            '{"id":"a::0001","translated_html":"<p class="indent">第一段</p>"}\n'
+            '{"id":"a::0002","translated_html":"<p><img alt="" src="cover.jpg" /></p>"}'
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                {"id": "a::0001", "translated_html": '<p class="indent">第一段</p>'},
+                {"id": "a::0002", "translated_html": '<p><img alt="" src="cover.jpg" /></p>'},
+            ],
+        )
+
+    def test_provider_parser_recovers_prefixed_relaxed_rows(self) -> None:
+        rows = parse_translated_rows(
+            'jsonl {"id":"a::0001","translated_html":"<p class="indent">第一段</p>"} '
+            '{"id":"a::0002","translated_html":"<p>第二段</p>"}'
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                {"id": "a::0001", "translated_html": '<p class="indent">第一段</p>'},
+                {"id": "a::0002", "translated_html": "<p>第二段</p>"},
             ],
         )
 
