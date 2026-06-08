@@ -89,6 +89,12 @@ type BabelJob = {
   };
   ai_fix_summary?: { fixed?: number; rounds?: number };
   glossary_summary?: { total?: number; approved?: number; pending?: number; ignored?: number };
+  usage_summary?: {
+    requests?: number;
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
   generated_title?: string;
   title_source?: string;
 };
@@ -220,6 +226,18 @@ const dictionaries = {
     aiFillTranslations: "AI Fill Translations",
     aiFillingTranslations: "AI filling...",
     aiFillingProgress: "Drafting glossary translations with the configured provider.",
+    estimateTitle: "Rough time estimate",
+    glossaryEstimate: "Glossary AI drafts",
+    translationEstimate: "Translation remaining",
+    usageTitle: "Provider usage",
+    totalTokens: "Total tokens",
+    promptTokens: "Prompt tokens",
+    completionTokens: "Completion tokens",
+    providerCalls: "Provider calls",
+    tokenUsageUnavailable: "Token usage unavailable from provider.",
+    estimateDone: "Done",
+    estimateUnavailable: "Not enough data",
+    minuteUnit: "min",
     glossarySummaryTitle: "Glossary readiness",
     glossarySummaryHint: "AI drafts fill blank pending translations first; approve the terms you want locked before translation.",
     approved: "Approved",
@@ -358,6 +376,18 @@ const dictionaries = {
     aiFillTranslations: "AI 补全译名",
     aiFillingTranslations: "AI 补全中...",
     aiFillingProgress: "正在调用已配置的 provider 生成术语译名草稿。",
+    estimateTitle: "粗略耗时预估",
+    glossaryEstimate: "术语表 AI 草稿",
+    translationEstimate: "翻译剩余",
+    usageTitle: "Provider 用量",
+    totalTokens: "总 Token",
+    promptTokens: "输入 Token",
+    completionTokens: "输出 Token",
+    providerCalls: "Provider 调用",
+    tokenUsageUnavailable: "当前 provider 未返回 token 用量。",
+    estimateDone: "已完成",
+    estimateUnavailable: "数据不足",
+    minuteUnit: "分钟",
     glossarySummaryTitle: "术语表就绪状态",
     glossarySummaryHint: "AI 会先补齐 pending 空译名；真正需要全书一致的术语，请审查后设为 approved。",
     approved: "已确认",
@@ -441,12 +471,12 @@ const dictionaries = {
     startWithUpload: "从上传开始",
     viewCurrentJob: "查看当前任务",
     guideSteps: [
-      ["Upload", "选择电子书、目标语言、元数据语言和输出格式。"],
-      ["Prepare", "生成私有工作区、批次清单和结构化术语表；provider 已配置时自动生成缺失译名草稿。"],
-      ["Review glossary", "打开术语表弹窗，审查 AI 草稿，再锁定人物名、地名、称呼、昵称、物种和高频术语。"],
-      ["Configure settings", "在设置中填写 provider、model、并发、AI QA 和标题自动化。"],
-      ["Start or resume", "开始翻译；失败后从有效批次继续。"],
-      ["Monitor and download", "查看进度，必要时展开终端，完成后下载产物。"],
+      ["上传", "选择电子书、目标语言和输出格式。"],
+      ["准备工作区", "生成私有工作区、批次清单和结构化术语表；provider 已配置时自动生成缺失译名草稿。"],
+      ["审查术语表", "打开术语表弹窗，审查 AI 草稿，再锁定人物名、地名、称呼、昵称、物种和高频术语。"],
+      ["配置设置", "在设置中填写 provider、model、并发、AI QA 和标题自动化。"],
+      ["开始或继续", "开始翻译；失败后从有效批次继续。"],
+      ["监控与下载", "查看进度，必要时展开终端，完成后下载产物。"],
     ],
   },
 } as const;
@@ -762,13 +792,16 @@ function App() {
   }
 
   function updateForm<K extends keyof FormState>(key: K, value: FormState[K]) {
-    setForm((previous) => ({ ...previous, [key]: value }));
     if (key === "target_language") {
-      const match = languages.find((language) => language.label === value || language.zh === value);
-      if (match) {
-        setForm((previous) => ({ ...previous, target_language: value, language: match.code }));
-      }
+      const match = findLanguage(value);
+      setForm((previous) => ({
+        ...previous,
+        target_language: match?.label || value,
+        language: match?.code || previous.language,
+      }));
+      return;
     }
+    setForm((previous) => ({ ...previous, [key]: value }));
   }
 
   function updateProvider<K extends keyof ProviderSettings>(key: K, value: ProviderSettings[K]) {
@@ -1104,8 +1137,7 @@ function UploadPanel({
           <X size={17} className="text-muted" weight="bold" />
         </div>
       </div>
-      <LanguageCombobox label={t.targetLanguage} value={form.target_language} mode="label" onChange={(value) => onUpdateForm("target_language", value)} />
-      <LanguageCombobox label={t.metadataLanguage} helper={t.metadataHelp} value={form.language} mode="code" onChange={(value) => onUpdateForm("language", value)} />
+      <LanguageSelect label={t.targetLanguage} value={form.target_language} onChange={(value) => onUpdateForm("target_language", value)} />
       <Field label={t.outputTitle} helper={`${t.titleState}: ${titleMode}`}>
         <Input name="title" value={form.title} placeholder={titleMode} onChange={(event) => onUpdateForm("title", event.target.value)} />
       </Field>
@@ -1126,18 +1158,18 @@ function UploadPanel({
   );
 }
 
-function LanguageCombobox({ label, helper, value, mode, onChange }: { label: string; helper?: string; value: string; mode: "label" | "code"; onChange: (value: string) => void }) {
-  const listId = `${mode}-language-options`;
+function LanguageSelect({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  const hasKnownValue = Boolean(findLanguage(value));
   return (
-    <Field label={label} helper={helper}>
-      <Input list={listId} value={value} onChange={(event) => onChange(event.target.value)} />
-      <datalist id={listId}>
+    <Field label={label}>
+      <Select name="target_language" value={value} onChange={(event) => onChange(event.target.value)}>
+        {!hasKnownValue && value ? <option value={value}>{value}</option> : null}
         {languages.map((language) => (
-          <option key={`${mode}-${language.code}`} value={mode === "label" ? language.label : language.code}>
-            {language.zh} {language.label}
+          <option key={language.code} value={language.label}>
+            {language.zh} / {language.label}
           </option>
         ))}
-      </datalist>
+      </Select>
     </Field>
   );
 }
@@ -1160,6 +1192,9 @@ function GlossarySummary({
   onAutofill: () => void;
 }) {
   const stats = glossaryStats(terms);
+  const glossaryEstimate = stats.empty
+    ? formatEstimateRange(Math.ceil(stats.empty / 40), 1, 45, 120, t)
+    : t.estimateDone;
   return (
     <div>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -1193,6 +1228,7 @@ function GlossarySummary({
           <p className="mt-2 text-xs leading-relaxed text-muted">{t.aiFillingProgress}</p>
         </div>
       ) : null}
+      <EstimatePanel title={t.estimateTitle} label={t.glossaryEstimate} value={terms.length ? glossaryEstimate : t.estimateUnavailable} />
       <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-5">
         <Metric label="Total" value={String(stats.total)} />
         <Metric label={t.approved} value={String(stats.approved)} />
@@ -1447,6 +1483,13 @@ function GlossaryTable({
 function JobSummary({ t, job, tone, percent, notice }: { t: (typeof dictionaries)[Locale]; job: BabelJob | null; tone: Tone; percent: number; notice: Notice }) {
   const failedBatches = failedBatchesForJob(job);
   const activeCount = job?.active_batches?.length || (job?.current_batch ? 1 : 0);
+  const remainingBatches = job ? Math.max(0, job.total_batches - job.completed_batches) : 0;
+  const concurrency = typeof job?.max_concurrency === "number" ? job.max_concurrency : 3;
+  const translationEstimate = job
+    ? remainingBatches > 0
+      ? formatEstimateRange(remainingBatches, concurrency, 90, 240, t)
+      : t.estimateDone
+    : t.estimateUnavailable;
   return (
     <div className="rounded-2xl border border-ink/12 bg-surface p-4">
       <div className="flex flex-col gap-5 lg:flex-row lg:items-start">
@@ -1463,6 +1506,8 @@ function JobSummary({ t, job, tone, percent, notice }: { t: (typeof dictionaries
           <div className={cn("progress-track mt-4 h-3 overflow-hidden rounded-full bg-line", tone === "running" && "is-running")}>
             <div className="progress-fill h-full rounded-full bg-clay transition-[width] duration-300" style={{ width: `${percent}%` }} />
           </div>
+          <EstimatePanel title={t.estimateTitle} label={t.translationEstimate} value={translationEstimate} />
+          {job?.status === "completed" ? <UsagePanel t={t} usage={job.usage_summary} /> : null}
           <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
             <Metric label={t.batches} value={job ? `${job.completed_batches}/${job.total_batches}` : "0/0"} />
             <Metric label={t.blocks} value={job?.block_count ? String(job.block_count) : "0"} />
@@ -1764,6 +1809,42 @@ function NoticeBar({ notice }: { notice: NonNullable<Notice> }) {
   );
 }
 
+function EstimatePanel({ title, label, value }: { title: string; label: string; value: string }) {
+  return (
+    <div className="mt-4 flex flex-col gap-1 rounded-xl border border-ink/10 bg-paper/70 px-3 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+      <span className="font-mono text-[0.66rem] font-bold uppercase tracking-[0.14em] text-muted">{title}</span>
+      <span className="font-semibold text-ink">
+        {label}: {value}
+      </span>
+    </div>
+  );
+}
+
+function UsagePanel({ t, usage }: { t: (typeof dictionaries)[Locale]; usage?: BabelJob["usage_summary"] }) {
+  const totalTokens = usage?.total_tokens || 0;
+  const promptTokens = usage?.prompt_tokens || 0;
+  const completionTokens = usage?.completion_tokens || 0;
+  const requests = usage?.requests || 0;
+  return (
+    <div className="mt-4 rounded-2xl border border-ink/10 bg-paper/70 p-3">
+      <div className="font-mono text-[0.66rem] font-bold uppercase tracking-[0.14em] text-muted">{t.usageTitle}</div>
+      {totalTokens ? (
+        <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <Metric label={t.totalTokens} value={formatNumber(totalTokens)} />
+          <Metric label={t.promptTokens} value={formatNumber(promptTokens)} />
+          <Metric label={t.completionTokens} value={formatNumber(completionTokens)} />
+          <Metric label={t.providerCalls} value={formatNumber(requests)} />
+        </div>
+      ) : (
+        <div className="mt-2 text-sm text-muted">
+          {t.tokenUsageUnavailable}
+          {requests ? ` ${t.providerCalls}: ${formatNumber(requests)}` : ""}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Field({ label, helper, children }: { label: string; helper?: string; children: React.ReactNode }) {
   return (
     <label className="block">
@@ -1823,6 +1904,23 @@ function glossaryStats(terms: GlossaryTerm[]) {
   );
 }
 
+function findLanguage(value: string) {
+  return languages.find((language) => language.label === value || language.zh === value || language.code === value);
+}
+
+function formatEstimateRange(workUnits: number, parallelism: number, fastSeconds: number, slowSeconds: number, t: (typeof dictionaries)[Locale]): string {
+  if (!Number.isFinite(workUnits) || workUnits <= 0) {
+    return t.estimateDone;
+  }
+  const safeParallelism = Math.max(1, Math.floor(parallelism || 1));
+  const minMinutes = Math.max(1, Math.ceil((workUnits * fastSeconds) / safeParallelism / 60));
+  const maxMinutes = Math.max(minMinutes, Math.ceil((workUnits * slowSeconds) / safeParallelism / 60));
+  const joiner = t.minuteUnit === "分钟" ? "" : " ";
+  return minMinutes === maxMinutes
+    ? `~${minMinutes}${joiner}${t.minuteUnit}`
+    : `~${minMinutes}-${maxMinutes}${joiner}${t.minuteUnit}`;
+}
+
 function hasGlossaryWarnings(terms: GlossaryTerm[]): boolean {
   const stats = glossaryStats(terms);
   return stats.pending > 0 || stats.empty > 0;
@@ -1871,6 +1969,10 @@ function formatTimestamp(value?: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat().format(value);
 }
 
 function eventTime(value?: string): string {

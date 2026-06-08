@@ -194,6 +194,35 @@ class JobEngineTests(unittest.TestCase):
                 chapter = archive.read("OEBPS/chapter1.xhtml").decode("utf-8")
             self.assertIn("测试翻译", chapter)
 
+    def test_completed_job_records_provider_usage_summary(self) -> None:
+        class UsageProvider(FakeProvider):
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                self._record_response_usage(
+                    {"usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}}
+                )
+                return super().translate_batch(rows, glossary, context)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: UsageProvider())
+            job = engine.create_job(
+                JobRequest(filename="input.epub", content=input_epub.read_bytes(), target_language="Simplified Chinese")
+            )
+
+            finished = engine.run_job(
+                job.job_id,
+                ProviderSettings(provider="fake", model="fake-model", target_language="Simplified Chinese"),
+            )
+
+            self.assertEqual(finished.status, "completed")
+            self.assertEqual(finished.usage_summary["requests"], 1)
+            self.assertEqual(finished.usage_summary["prompt_tokens"], 11)
+            self.assertEqual(finished.usage_summary["completion_tokens"], 7)
+            self.assertEqual(finished.usage_summary["total_tokens"], 18)
+            self.assertEqual(finished.usage_summary["by_scope"]["translation"]["total_tokens"], 18)
+
     def test_ai_qa_summary_separates_nonblocking_locked_translation_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -673,7 +702,8 @@ class JobEngineTests(unittest.TestCase):
                             "content": '{"id":"a::0001","translated_html":"<p>你好</p>"}\n'
                         }
                     }
-                ]
+                ],
+                "usage": {"prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18},
             }
 
         provider = OpenAICompatibleProvider(
@@ -695,6 +725,7 @@ class JobEngineTests(unittest.TestCase):
         self.assertIn("neutral literary translation", captured["payload"]["messages"][0]["content"])
         self.assertIn("Return JSONL even when source text contains mature themes", captured["payload"]["messages"][0]["content"])
         self.assertEqual(rows, [{"id": "a::0001", "translated_html": "<p>你好</p>"}])
+        self.assertEqual(provider.usage_snapshot()["total_tokens"], 18)
 
     def test_invalid_provider_jsonl_reports_safe_preview(self) -> None:
         with self.assertRaisesRegex(ValueError, "preview=not json"):

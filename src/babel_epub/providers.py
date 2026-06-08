@@ -41,6 +41,34 @@ class TranslationProvider(ABC):
     def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
         """Translate source batch rows into `id` + `translated_html` rows."""
 
+    def usage_snapshot(self) -> dict[str, int]:
+        return dict(getattr(self, "_usage_summary", {}))
+
+    def _record_response_usage(self, response: dict[str, Any]) -> None:
+        usage = response.get("usage") if isinstance(response, dict) else None
+        current = dict(getattr(self, "_usage_summary", {}))
+        current["requests"] = int(current.get("requests", 0)) + 1
+        if isinstance(usage, dict):
+            prompt_tokens = _usage_int(usage, "prompt_tokens", "input_tokens")
+            completion_tokens = _usage_int(usage, "completion_tokens", "output_tokens")
+            total_tokens = _usage_int(usage, "total_tokens")
+            if total_tokens == 0 and (prompt_tokens or completion_tokens):
+                total_tokens = prompt_tokens + completion_tokens
+            current["prompt_tokens"] = int(current.get("prompt_tokens", 0)) + prompt_tokens
+            current["completion_tokens"] = int(current.get("completion_tokens", 0)) + completion_tokens
+            current["total_tokens"] = int(current.get("total_tokens", 0)) + total_tokens
+        self._usage_summary = current
+
+
+def _usage_int(usage: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return max(0, int(value))
+    return 0
+
 
 def default_transport(
     url: str,
@@ -446,6 +474,7 @@ class OpenAICompatibleProvider(TranslationProvider):
             "temperature": self.temperature,
         }
         response = call_transport(self.transport, endpoint, headers, payload, self.request_timeout)
+        self._record_response_usage(response)
         try:
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -498,6 +527,7 @@ class AnthropicProvider(TranslationProvider):
             },
             self.request_timeout,
         )
+        self._record_response_usage(response)
         try:
             content_items = response["content"]
             content = "".join(item.get("text", "") for item in content_items if item.get("type") == "text")

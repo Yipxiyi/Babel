@@ -145,6 +145,7 @@ class BabelJob:
     ai_qa_summary: dict = field(default_factory=dict)
     ai_fix_summary: dict = field(default_factory=dict)
     glossary_summary: dict = field(default_factory=dict)
+    usage_summary: dict = field(default_factory=dict)
     generated_title: str = ""
     title_source: str = "manual"
 
@@ -250,6 +251,7 @@ class BabelJobEngine:
             ai_qa_summary=dict(data.get("ai_qa_summary") or {}),
             ai_fix_summary=dict(data.get("ai_fix_summary") or {}),
             glossary_summary=dict(data.get("glossary_summary") or {}),
+            usage_summary=dict(data.get("usage_summary") or {}),
             generated_title=data.get("generated_title", ""),
             title_source=data.get("title_source", "manual"),
         )
@@ -297,6 +299,25 @@ class BabelJobEngine:
             active for active in job.active_batches if int(active.get("batch", -1)) != batch_number
         ]
         self._set_active_current(job)
+
+    def _record_provider_usage(self, job_id: str, provider: TranslationProvider, scope: str) -> None:
+        usage = provider.usage_snapshot()
+        if not usage:
+            return
+
+        def mutate(job: BabelJob) -> None:
+            current = dict(job.usage_summary or {})
+            for key in ("requests", "prompt_tokens", "completion_tokens", "total_tokens"):
+                current[key] = int(current.get(key, 0)) + int(usage.get(key, 0))
+            by_scope = dict(current.get("by_scope") or {})
+            scoped = dict(by_scope.get(scope) or {})
+            for key in ("requests", "prompt_tokens", "completion_tokens", "total_tokens"):
+                scoped[key] = int(scoped.get(key, 0)) + int(usage.get(key, 0))
+            by_scope[scope] = scoped
+            current["by_scope"] = by_scope
+            job.usage_summary = current
+
+        self._mutate_job(job_id, mutate)
 
     def _start_batch(self, job_id: str, batch: dict, attempt: int) -> None:
         summary = batch_summary(batch)
@@ -524,6 +545,7 @@ class BabelJobEngine:
                 term["translation"] = translation
                 term["locked"] = False
                 filled += 1
+        self._record_provider_usage(job_id, provider, "glossary")
 
         normalized = write_glossary_terms(job.work_dir, terms)
         job.glossary_path.write_text(
@@ -621,14 +643,17 @@ class BabelJobEngine:
             self._start_batch(job_id, batch, attempt)
             try:
                 provider = self.provider_factory(settings)
-                translated_rows = self._translate_rows_with_safety_fallback(
-                    job_id,
-                    provider,
-                    batch,
-                    batch_rows,
-                    glossary,
-                    context,
-                )
+                try:
+                    translated_rows = self._translate_rows_with_safety_fallback(
+                        job_id,
+                        provider,
+                        batch,
+                        batch_rows,
+                        glossary,
+                        context,
+                    )
+                finally:
+                    self._record_provider_usage(job_id, provider, "translation")
                 translated_rows = repair_translated_rows_structure(batch_rows, translated_rows)
                 issues = validate_translation_rows(batch_rows, translated_rows)
                 if issues:
@@ -814,6 +839,7 @@ class BabelJobEngine:
                 glossary=glossary,
                 context="Translate this ebook title naturally. Return only the translated title row.",
             )
+            self._record_provider_usage(job_id, provider, "title")
             generated = html_text(str(translated[0].get("translated_html", ""))).strip()
         except Exception:
             generated = ""
@@ -920,6 +946,7 @@ class BabelJobEngine:
             context = context_path.read_text(encoding="utf-8") if context_path.exists() else ""
             valid_resume_batches = self._valid_resume_batch_numbers(pipeline_dir, manifest) if resume else set()
             max_concurrency = normalize_max_concurrency(settings.max_concurrency)
+            self._mutate_job(job_id, lambda current: setattr(current, "usage_summary", {}))
             self._maybe_generate_title(job_id, settings, provider, glossary, auto_title_enabled)
 
             def start_mutation(job: BabelJob) -> None:
