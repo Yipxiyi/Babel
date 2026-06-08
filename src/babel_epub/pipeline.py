@@ -22,7 +22,7 @@ from typing import Iterable
 from xml.etree import ElementTree as ET
 
 from .formats import convert_epub_to_output, normalize_to_epub, write_input_format_metadata, write_output_format_metadata
-from .glossary import build_glossary_terms, render_glossary_markdown
+from .glossary import build_glossary_terms, normalize_term, render_glossary_markdown, should_skip_name_candidate
 
 
 XHTML_NS = "http://www.w3.org/1999/xhtml"
@@ -403,10 +403,8 @@ def extract_name_candidates(out_dir: Path, min_count: int) -> list[dict]:
     counter: Counter[str] = Counter()
     for block in read_jsonl(out_dir / "blocks.jsonl"):
         for match in NAME_RE.findall(block["source_text"]):
-            term = normalize_space(match)
-            if not term or term in COMMON_NAME_FALSE_POSITIVES:
-                continue
-            if all(part in COMMON_NAME_FALSE_POSITIVES for part in term.split()):
+            term = normalize_term(match)
+            if should_skip_name_candidate(term):
                 continue
             counter[term] += 1
     rows = [{"term": term, "count": count} for term, count in counter.most_common() if count >= min_count]

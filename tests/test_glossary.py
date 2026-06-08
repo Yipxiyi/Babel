@@ -62,6 +62,70 @@ class GlossaryTests(unittest.TestCase):
             self.assertIn("| Rook | 鲁克 |", markdown)
             self.assertTrue((pipeline_dir / "glossary_terms.json").exists())
 
+    def test_structured_glossary_filters_modern_dialogue_noise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pipeline_dir = Path(tmp)
+            write_jsonl(
+                pipeline_dir / "blocks.jsonl",
+                [
+                    {
+                        "id": "chapter.xhtml::0001",
+                        "source_text": "Logan met Grace. Yeah, Logan said, okay, Where are we going?",
+                    },
+                    {
+                        "id": "chapter.xhtml::0002",
+                        "source_text": "Then Grace called Logan. Fuck, Dad, God, and Twitter were not people.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0003",
+                        "source_text": "Grace saw Logan on Friday. Because, Which, Not, Coach, Jesus.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0004",
+                        "source_text": "Grace smiled at Logan.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0005",
+                        "source_text": "Because. Which. Not. Coach. Jesus. Where. Friday. Hell. Once. Oh God.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0006",
+                        "source_text": "Hell. Once. Oh God. T-shirt.",
+                    },
+                    {
+                        "id": "chapter.xhtml::0007",
+                        "source_text": "T-shirt.",
+                    },
+                ],
+            )
+
+            terms = build_glossary_terms(pipeline_dir, "Simplified Chinese")
+            by_source = {term["source"]: term for term in terms}
+
+            self.assertIn("Logan", by_source)
+            self.assertIn("Grace", by_source)
+            for noise in (
+                "Because",
+                "Coach",
+                "Dad",
+                "Friday",
+                "Fuck",
+                "God",
+                "Hell",
+                "Jesus",
+                "Not",
+                "Oh God",
+                "Okay",
+                "Once",
+                "T-shirt",
+                "Then",
+                "Twitter",
+                "Where",
+                "Which",
+                "Yeah",
+            ):
+                self.assertNotIn(noise, by_source)
+
     def test_ai_qa_detects_and_repairs_untranslated_locked_terms(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pipeline_dir = Path(tmp)

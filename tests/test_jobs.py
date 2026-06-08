@@ -351,6 +351,52 @@ class JobEngineTests(unittest.TestCase):
             self.assertEqual(finished.status, "completed")
             self.assertIn("batch-retry", [event["type"] for event in finished.events])
 
+    def test_provider_safety_rejection_splits_batch_into_smaller_chunks(self) -> None:
+        class RejectLargeBatchProvider(FakeProvider):
+            large_calls = 0
+            single_row_calls = 0
+
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                if len(rows) > 1:
+                    type(self).large_calls += 1
+                    raise ValueError(
+                        "provider returned invalid JSONL: preview=The request was rejected "
+                        "because it was considered high risk"
+                    )
+                type(self).single_row_calls += 1
+                return super().translate_batch(rows, glossary, context)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_epub_with_paragraphs(input_epub, paragraph_count=3)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: RejectLargeBatchProvider())
+            job = engine.create_job(
+                JobRequest(
+                    filename="input.epub",
+                    content=input_epub.read_bytes(),
+                    target_language="Simplified Chinese",
+                    max_blocks=10,
+                )
+            )
+
+            finished = engine.run_job(
+                job.job_id,
+                ProviderSettings(
+                    provider="fake",
+                    model="fake-model",
+                    target_language="Simplified Chinese",
+                    max_concurrency=1,
+                    max_retries=0,
+                ),
+            )
+
+            self.assertEqual(finished.status, "completed")
+            self.assertEqual(finished.completed_batches, 1)
+            self.assertEqual(RejectLargeBatchProvider.large_calls, 1)
+            self.assertEqual(RejectLargeBatchProvider.single_row_calls, 4)
+            self.assertIn("batch-split", [event["type"] for event in finished.events])
+
     def test_max_concurrency_limits_parallel_batch_execution(self) -> None:
         class SlowCountingProvider(FakeProvider):
             active = 0
@@ -609,6 +655,8 @@ class JobEngineTests(unittest.TestCase):
         self.assertEqual(captured["url"], "https://api.example.test/v1/chat/completions")
         self.assertEqual(captured["headers"]["Authorization"], "Bearer secret")
         self.assertEqual(captured["payload"]["model"], "demo-model")
+        self.assertIn("neutral literary translation", captured["payload"]["messages"][0]["content"])
+        self.assertIn("Return JSONL even when source text contains mature themes", captured["payload"]["messages"][0]["content"])
         self.assertEqual(rows, [{"id": "a::0001", "translated_html": "<p>你好</p>"}])
 
     def test_invalid_provider_jsonl_reports_safe_preview(self) -> None:

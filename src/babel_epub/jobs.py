@@ -42,6 +42,7 @@ from .providers import (
     normalize_max_concurrency,
     normalize_max_retries,
     repair_translated_rows_structure,
+    is_provider_safety_rejection,
     validate_provider_settings,
 )
 
@@ -620,7 +621,14 @@ class BabelJobEngine:
             self._start_batch(job_id, batch, attempt)
             try:
                 provider = self.provider_factory(settings)
-                translated_rows = provider.translate_batch(batch_rows, glossary=glossary, context=context)
+                translated_rows = self._translate_rows_with_safety_fallback(
+                    job_id,
+                    provider,
+                    batch,
+                    batch_rows,
+                    glossary,
+                    context,
+                )
                 translated_rows = repair_translated_rows_structure(batch_rows, translated_rows)
                 issues = validate_translation_rows(batch_rows, translated_rows)
                 if issues:
@@ -634,6 +642,51 @@ class BabelJobEngine:
                     attempt = next_attempt
                     continue
                 raise
+
+    def _translate_rows_with_safety_fallback(
+        self,
+        job_id: str,
+        provider: TranslationProvider,
+        batch: dict,
+        rows: list[dict],
+        glossary: str,
+        context: str,
+    ) -> list[dict]:
+        try:
+            return provider.translate_batch(rows, glossary=glossary, context=context)
+        except Exception as exc:
+            if len(rows) <= 1 or not is_provider_safety_rejection(exc):
+                raise
+
+        chunk_size = 1
+
+        def split_event(job: BabelJob) -> None:
+            self._append_event(
+                job,
+                "batch-split",
+                (
+                    f"Provider rejected batch {batch['batch']} as high risk; "
+                    f"retrying {len(rows)} rows in chunks of {chunk_size}."
+                ),
+                batch=batch,
+                chunk_size=chunk_size,
+                row_count=len(rows),
+            )
+
+        self._mutate_job(job_id, split_event)
+        translated: list[dict] = []
+        for offset in range(0, len(rows), chunk_size):
+            translated.extend(
+                self._translate_rows_with_safety_fallback(
+                    job_id,
+                    provider,
+                    batch,
+                    rows[offset : offset + chunk_size],
+                    glossary,
+                    context,
+                )
+            )
+        return translated
 
     def _run_ai_quality_checks(
         self,

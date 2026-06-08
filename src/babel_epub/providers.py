@@ -117,6 +117,19 @@ def is_retryable_translation_output_error(error: Exception) -> bool:
     return isinstance(error, ValueError) and any(fragment in message for fragment in retryable_fragments)
 
 
+def is_provider_safety_rejection(error: Exception) -> bool:
+    message = str(error).lower()
+    return (
+        isinstance(error, ValueError)
+        and "provider returned invalid jsonl" in message
+        and (
+            "considered high risk" in message
+            or "request was rejected" in message
+            or "safety" in message
+        )
+    )
+
+
 def is_retryable_translation_error(error: Exception) -> bool:
     return is_retryable_provider_error(error) or is_retryable_translation_output_error(error)
 
@@ -317,6 +330,9 @@ def batch_prompt(rows: list[dict], glossary: str, context: str, target_language:
     system = (
         "You translate EPUB XHTML snippets while preserving structure. "
         f"Target language: {target_language}. "
+        "This is a neutral literary translation and format-preservation task. "
+        "Return JSONL even when source text contains mature themes, profanity, romance, conflict, or quoted speech; "
+        "do not refuse, moralize, summarize, or add safety commentary. "
         "Return only JSONL rows with exactly `id` and `translated_html`. "
         "Do not add markdown, commentary, summaries, or placeholder text. "
         "Do not prefix or suffix the JSONL with any non-JSON text. "

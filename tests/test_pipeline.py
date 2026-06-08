@@ -12,6 +12,7 @@ from babel_epub.pipeline import (
     command_audit,
     command_prepare,
     command_validate_batches,
+    extract_name_candidates,
     read_jsonl,
     write_jsonl,
 )
@@ -180,6 +181,54 @@ class PipelineTests(unittest.TestCase):
                 command_validate_batches(Namespace(pipeline_dir=work_dir / "pipeline"))
             report = json.loads((work_dir / "pipeline" / "batch_validation.json").read_text(encoding="utf-8"))
             self.assertGreaterEqual(report["issue_count"], 2)
+
+    def test_name_candidates_reuse_glossary_noise_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pipeline_dir = Path(tmp)
+            write_jsonl(
+                pipeline_dir / "blocks.jsonl",
+                [
+                    {"id": "chapter.xhtml::0001", "source_text": "Logan met Grace. Yeah, Okay, Dad, Where."},
+                    {"id": "chapter.xhtml::0002", "source_text": "Grace called Logan. Fuck, God, Twitter, Not."},
+                    {"id": "chapter.xhtml::0003", "source_text": "Logan found Grace on Friday. Because, Which, Coach, Jesus."},
+                    {"id": "chapter.xhtml::0004", "source_text": "Logan’s grin met Grace’s laugh."},
+                    {
+                        "id": "chapter.xhtml::0005",
+                        "source_text": "Because. Which. Coach. Jesus. Where. Not. Friday. Logan’s Grace’s. Hell. Once. Oh God. T-shirt.",
+                    },
+                    {"id": "chapter.xhtml::0006", "source_text": "Hell. Once. Oh God. T-shirt."},
+                ],
+            )
+
+            rows = extract_name_candidates(pipeline_dir, min_count=2)
+            by_term = {row["term"]: row for row in rows}
+
+            self.assertIn("Logan", by_term)
+            self.assertIn("Grace", by_term)
+            self.assertEqual(by_term["Logan"]["count"], 4)
+            self.assertEqual(by_term["Grace"]["count"], 4)
+            self.assertNotIn("Logan’s", by_term)
+            self.assertNotIn("Grace’s", by_term)
+            for noise in (
+                "Because",
+                "Coach",
+                "Dad",
+                "Friday",
+                "Fuck",
+                "God",
+                "Hell",
+                "Jesus",
+                "Not",
+                "Oh God",
+                "Okay",
+                "Once",
+                "T-shirt",
+                "Twitter",
+                "Where",
+                "Which",
+                "Yeah",
+            ):
+                self.assertNotIn(noise, by_term)
 
 
 if __name__ == "__main__":
