@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 import socket
+import threading
+import time
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
@@ -34,6 +36,15 @@ class ProviderSettings:
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
     max_retries: int = DEFAULT_MAX_RETRIES
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
+    structured_output_enabled: bool = False
+    memory_enabled: bool = False
+    memory_project_id: str = ""
+    memory_path: str = ""
+    max_requests_per_minute: int = 0
+    max_tokens_per_minute: int = 0
+    budget_limit: float = 0.0
+    input_cost_per_1m_tokens: float = 0.0
+    output_cost_per_1m_tokens: float = 0.0
 
 
 class TranslationProvider(ABC):
@@ -95,6 +106,113 @@ def default_transport(
             raise TimeoutError(f"provider read timed out after {timeout:g}s") from exc
         raise
 
+
+
+class BudgetExceededError(RuntimeError):
+    """Raised when a job would exceed its configured provider budget."""
+
+
+def normalize_rate_limit(value: int | float | str | None) -> int:
+    try:
+        parsed = int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        parsed = 0
+    return min(max(parsed, 0), 1_000_000)
+
+
+def normalize_budget_limit(value: int | float | str | None) -> float:
+    try:
+        parsed = float(value) if value is not None else 0.0
+    except (TypeError, ValueError):
+        parsed = 0.0
+    return round(max(parsed, 0.0), 6)
+
+
+def normalize_cost_per_1m(value: int | float | str | None) -> float:
+    try:
+        parsed = float(value) if value is not None else 0.0
+    except (TypeError, ValueError):
+        parsed = 0.0
+    return round(max(parsed, 0.0), 6)
+
+
+def estimate_text_tokens(value: str) -> int:
+    compact = re.sub(r"\s+", "", value or "")
+    if not compact:
+        return 0
+    return max(1, int(len(compact) / 4) + 1)
+
+
+def estimate_rows_tokens(rows: list[dict], glossary: str = "", context: str = "") -> dict[str, int]:
+    prompt_tokens = estimate_text_tokens(glossary) + estimate_text_tokens(context) + 24
+    completion_tokens = 0
+    for row in rows:
+        source = str(row.get("source_html") or row.get("source_text") or "")
+        row_tokens = estimate_text_tokens(source)
+        prompt_tokens += row_tokens + 8
+        completion_tokens += max(1, row_tokens)
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+
+
+def estimate_cost(settings: ProviderSettings, prompt_tokens: int = 0, completion_tokens: int = 0) -> float:
+    return round(
+        (max(0, prompt_tokens) * normalize_cost_per_1m(settings.input_cost_per_1m_tokens) / 1_000_000)
+        + (max(0, completion_tokens) * normalize_cost_per_1m(settings.output_cost_per_1m_tokens) / 1_000_000),
+        6,
+    )
+
+
+class RateLimitState:
+    def __init__(
+        self,
+        max_requests_per_minute: int = 0,
+        max_tokens_per_minute: int = 0,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.max_requests_per_minute = normalize_rate_limit(max_requests_per_minute)
+        self.max_tokens_per_minute = normalize_rate_limit(max_tokens_per_minute)
+        self.clock = clock
+        self.sleeper = sleeper
+        self._lock = threading.Lock()
+        self.window_started_at = self.clock()
+        self.requests_used = 0
+        self.tokens_used = 0
+
+    def acquire(self, token_count: int = 0) -> float:
+        with self._lock:
+            if not self.max_requests_per_minute and not self.max_tokens_per_minute:
+                return 0.0
+            tokens = max(0, int(token_count or 0))
+            now = self.clock()
+            elapsed = now - self.window_started_at
+            if elapsed >= 60.0:
+                self.window_started_at = now
+                self.requests_used = 0
+                self.tokens_used = 0
+                elapsed = 0.0
+            would_exceed_requests = bool(
+                self.max_requests_per_minute and self.requests_used + 1 > self.max_requests_per_minute
+            )
+            would_exceed_tokens = bool(
+                self.max_tokens_per_minute and self.tokens_used + tokens > self.max_tokens_per_minute
+            )
+            delay = 0.0
+            if would_exceed_requests or would_exceed_tokens:
+                delay = max(0.0, 60.0 - elapsed)
+                if delay:
+                    self.sleeper(delay)
+                self.window_started_at = self.clock()
+                self.requests_used = 0
+                self.tokens_used = 0
+            self.requests_used += 1
+            self.tokens_used += tokens
+            return delay
 
 def normalize_max_concurrency(value: int | float | str | None) -> int:
     try:
@@ -174,15 +292,29 @@ def validate_provider_settings(settings: ProviderSettings) -> ProviderSettings:
     api_key = settings.api_key.strip()
     if provider in {"fake", "dry-run", "dry_run"}:
         return settings
-    if not model:
-        raise ValueError("model is required")
-    if provider in {"openai", "openai-compatible", "openai_compatible", "compatible"}:
+    if provider in {"openai", "openai-compatible", "openai_compatible", "compatible", "openai-responses", "openai_responses", "responses"}:
+        if not model:
+            raise ValueError("model is required")
         if not base_url:
             raise ValueError("base_url is required for OpenAI-compatible providers")
         if _is_official_openai_base_url(base_url) and not api_key:
             raise ValueError("api_key is required for the official OpenAI endpoint")
         return settings
+    if provider in {"ollama", "local", "local-openai", "local_openai"}:
+        if not model:
+            raise ValueError("model is required")
+        return settings
+    if provider in {"deepl", "deep-l"}:
+        if not api_key:
+            raise ValueError("api_key is required for DeepL")
+        return settings
+    if provider in {"google", "google-translate", "google_translate"}:
+        if not api_key:
+            raise ValueError("api_key is required for Google Translate")
+        return settings
     if provider in {"anthropic", "claude"}:
+        if not model:
+            raise ValueError("model is required")
         if not api_key:
             raise ValueError("api_key is required for Anthropic")
         return settings
@@ -403,7 +535,77 @@ def repair_translated_rows_structure(batch_rows: list[dict], translated_rows: li
     return repaired
 
 
-def batch_prompt(rows: list[dict], glossary: str, context: str, target_language: str) -> list[dict[str, str]]:
+def translated_rows_json_schema() -> dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "babel_translated_rows",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "rows": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "id": {"type": "string"},
+                                "translated_html": {"type": "string"},
+                            },
+                            "required": ["id", "translated_html"],
+                        },
+                    }
+                },
+                "required": ["rows"],
+            },
+        },
+    }
+
+
+def translated_rows_response_schema() -> dict[str, Any]:
+    schema = translated_rows_json_schema()["json_schema"]
+    return {
+        "type": "json_schema",
+        "name": schema["name"],
+        "strict": schema["strict"],
+        "schema": schema["schema"],
+    }
+
+
+def response_text_content(response: dict[str, Any]) -> str:
+    output_text = response.get("output_text")
+    if isinstance(output_text, str):
+        return output_text
+    chunks: list[str] = []
+    output = response.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        text = part.get("text") or part.get("content")
+                        if isinstance(text, str):
+                            chunks.append(text)
+    if chunks:
+        return "".join(chunks)
+    try:
+        return str(response["choices"][0]["message"]["content"])
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def batch_prompt(
+    rows: list[dict],
+    glossary: str,
+    context: str,
+    target_language: str,
+    structured_output: bool = False,
+) -> list[dict[str, str]]:
     compact_rows = [
         {
             "id": row["id"],
@@ -412,17 +614,27 @@ def batch_prompt(rows: list[dict], glossary: str, context: str, target_language:
         }
         for row in rows
     ]
+    output_format_name = "JSON" if structured_output else "JSONL"
+    output_contract = (
+        "Return a single JSON object with a `rows` array. Each item must have exactly `id` and `translated_html`. "
+        if structured_output
+        else "Return only JSONL rows with exactly `id` and `translated_html`. "
+    )
+    prefix_contract = "Do not add markdown, commentary, summaries, or placeholder text. "
+    if not structured_output:
+        prefix_contract += (
+            "Do not prefix or suffix the JSONL with any non-JSON text. "
+            "Escape quotes and control characters so every line is valid JSON. "
+        )
     system = (
         "You translate EPUB XHTML snippets while preserving structure. "
         f"Target language: {target_language}. "
         "This is a neutral literary translation and format-preservation task. "
-        "Return JSONL even when source text contains mature themes, profanity, romance, conflict, or quoted speech; "
+        f"Return {output_format_name} even when source text contains mature themes, profanity, romance, conflict, or quoted speech; "
         "do not refuse, moralize, summarize, or add safety commentary. "
-        "Return only JSONL rows with exactly `id` and `translated_html`. "
-        "Do not add markdown, commentary, summaries, or placeholder text. "
-        "Do not prefix or suffix the JSONL with any non-JSON text. "
-        "Escape quotes and control characters so every line is valid JSON. "
-        "Return exactly one row for every input id, and never omit anchors. "
+        + output_contract
+        + prefix_contract
+        + "Return exactly one row for every input id, and never omit anchors. "
         "Preserve root tags, attributes, IDs, anchors, links, images, CSS classes, "
         "and inline emphasis tags. Translate only human-readable text."
     )
@@ -447,6 +659,7 @@ class OpenAICompatibleProvider(TranslationProvider):
         target_language: str,
         temperature: float = 0.2,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        structured_output_enabled: bool = False,
         transport: Transport = default_transport,
     ) -> None:
         if not base_url:
@@ -459,6 +672,7 @@ class OpenAICompatibleProvider(TranslationProvider):
         self.target_language = target_language
         self.temperature = temperature
         self.request_timeout = normalize_request_timeout(request_timeout)
+        self.structured_output_enabled = bool(structured_output_enabled)
         self.transport = transport
 
     def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
@@ -470,15 +684,77 @@ class OpenAICompatibleProvider(TranslationProvider):
             headers["Authorization"] = f"Bearer {self.api_key}"
         payload = {
             "model": self.model,
-            "messages": batch_prompt(rows, glossary, context, self.target_language),
+            "messages": batch_prompt(
+                rows,
+                glossary,
+                context,
+                self.target_language,
+                structured_output=self.structured_output_enabled,
+            ),
             "temperature": self.temperature,
         }
+        if self.structured_output_enabled:
+            payload["response_format"] = translated_rows_json_schema()
         response = call_transport(self.transport, endpoint, headers, payload, self.request_timeout)
         self._record_response_usage(response)
         try:
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ValueError(f"unexpected OpenAI-compatible response: {response!r}") from exc
+        return parse_translated_rows(content)
+
+
+class OpenAIResponsesProvider(TranslationProvider):
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        target_language: str,
+        temperature: float = 0.2,
+        request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        structured_output_enabled: bool = False,
+        transport: Transport = default_transport,
+    ) -> None:
+        if not base_url:
+            raise ValueError("base_url is required for OpenAI Responses providers")
+        if not model:
+            raise ValueError("model is required")
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model = model
+        self.target_language = target_language
+        self.temperature = temperature
+        self.request_timeout = normalize_request_timeout(request_timeout)
+        self.structured_output_enabled = bool(structured_output_enabled)
+        self.transport = transport
+
+    def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+        endpoint = self.base_url
+        if not endpoint.endswith("/responses"):
+            endpoint = f"{endpoint}/responses"
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "input": batch_prompt(
+                rows,
+                glossary,
+                context,
+                self.target_language,
+                structured_output=self.structured_output_enabled,
+            ),
+            "temperature": self.temperature,
+        }
+        if self.structured_output_enabled:
+            payload["text"] = {"format": translated_rows_response_schema()}
+        response = call_transport(self.transport, endpoint, headers, payload, self.request_timeout)
+        self._record_response_usage(response)
+        content = response_text_content(response)
+        if not content:
+            raise ValueError(f"unexpected OpenAI Responses response: {response!r}")
         return parse_translated_rows(content)
 
 
@@ -536,6 +812,107 @@ class AnthropicProvider(TranslationProvider):
         return parse_translated_rows(content)
 
 
+
+class DeepLProvider(TranslationProvider):
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        target_language: str,
+        base_url: str = "https://api-free.deepl.com/v2",
+        request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        transport: Transport = default_transport,
+    ) -> None:
+        if not api_key:
+            raise ValueError("api_key is required for DeepL")
+        self.api_key = api_key
+        self.target_language = target_language
+        self.base_url = (base_url or "https://api-free.deepl.com/v2").rstrip("/")
+        self.request_timeout = normalize_request_timeout(request_timeout)
+        self.transport = transport
+
+    def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+        texts = [str(row.get("source_html") or row.get("source_text") or "") for row in rows]
+        response = call_transport(
+            self.transport,
+            f"{self.base_url}/translate",
+            {"Content-Type": "application/json", "Authorization": f"DeepL-Auth-Key {self.api_key}"},
+            {
+                "text": texts,
+                "target_lang": _target_language_code(self.target_language).upper(),
+                "tag_handling": "html",
+            },
+            self.request_timeout,
+        )
+        self._record_response_usage(response)
+        translations = response.get("translations") if isinstance(response, dict) else None
+        if not isinstance(translations, list):
+            raise ValueError(f"unexpected DeepL response: {response!r}")
+        return [
+            {"id": row["id"], "translated_html": str((translations[index] or {}).get("text", ""))}
+            for index, row in enumerate(rows)
+        ]
+
+
+class GoogleTranslateProvider(TranslationProvider):
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        target_language: str,
+        base_url: str = "https://translation.googleapis.com/language/translate/v2",
+        request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        transport: Transport = default_transport,
+    ) -> None:
+        if not api_key:
+            raise ValueError("api_key is required for Google Translate")
+        self.api_key = api_key
+        self.target_language = target_language
+        self.base_url = base_url or "https://translation.googleapis.com/language/translate/v2"
+        self.request_timeout = normalize_request_timeout(request_timeout)
+        self.transport = transport
+
+    def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+        texts = [str(row.get("source_html") or row.get("source_text") or "") for row in rows]
+        separator = "&" if "?" in self.base_url else "?"
+        response = call_transport(
+            self.transport,
+            f"{self.base_url}{separator}key={self.api_key}",
+            {"Content-Type": "application/json"},
+            {"q": texts, "target": _target_language_code(self.target_language), "format": "html"},
+            self.request_timeout,
+        )
+        self._record_response_usage(response)
+        try:
+            translations = response["data"]["translations"]
+        except (KeyError, TypeError) as exc:
+            raise ValueError(f"unexpected Google Translate response: {response!r}") from exc
+        if not isinstance(translations, list):
+            raise ValueError(f"unexpected Google Translate response: {response!r}")
+        return [
+            {"id": row["id"], "translated_html": str((translations[index] or {}).get("translatedText", ""))}
+            for index, row in enumerate(rows)
+        ]
+
+
+def _target_language_code(value: str) -> str:
+    lower = (value or "").strip().lower()
+    if "chinese" in lower or "中文" in value or lower in {"zh", "zh-cn", "simplified chinese"}:
+        return "zh"
+    if "japanese" in lower or "日" in value:
+        return "ja"
+    if "korean" in lower or "韩" in value:
+        return "ko"
+    if "english" in lower or "英" in value:
+        return "en"
+    if "french" in lower or "法" in value:
+        return "fr"
+    if "german" in lower or "德" in value:
+        return "de"
+    if "spanish" in lower or "西" in value:
+        return "es"
+    return lower[:2] if len(lower) >= 2 else "zh"
+
 def _set_all_text(element: ET.Element) -> None:
     element.text = "测试翻译"
     for child in list(element):
@@ -560,6 +937,26 @@ def make_provider(settings: ProviderSettings) -> TranslationProvider:
     provider = settings.provider.lower().strip()
     if provider in {"fake", "dry-run", "dry_run"}:
         return FakeProvider()
+    if provider in {"ollama", "local", "local-openai", "local_openai"}:
+        return OpenAICompatibleProvider(
+            base_url=settings.base_url or "http://127.0.0.1:11434/v1",
+            api_key=settings.api_key,
+            model=settings.model,
+            target_language=settings.target_language,
+            temperature=settings.temperature,
+            request_timeout=settings.request_timeout,
+            structured_output_enabled=settings.structured_output_enabled,
+        )
+    if provider in {"openai-responses", "openai_responses", "responses"}:
+        return OpenAIResponsesProvider(
+            base_url=settings.base_url,
+            api_key=settings.api_key,
+            model=settings.model,
+            target_language=settings.target_language,
+            temperature=settings.temperature,
+            request_timeout=settings.request_timeout,
+            structured_output_enabled=settings.structured_output_enabled,
+        )
     if provider in {"openai", "openai-compatible", "openai_compatible", "compatible"}:
         return OpenAICompatibleProvider(
             base_url=settings.base_url,
@@ -568,6 +965,7 @@ def make_provider(settings: ProviderSettings) -> TranslationProvider:
             target_language=settings.target_language,
             temperature=settings.temperature,
             request_timeout=settings.request_timeout,
+            structured_output_enabled=settings.structured_output_enabled,
         )
     if provider in {"anthropic", "claude"}:
         return AnthropicProvider(
@@ -576,6 +974,20 @@ def make_provider(settings: ProviderSettings) -> TranslationProvider:
             model=settings.model,
             target_language=settings.target_language,
             temperature=settings.temperature,
+            request_timeout=settings.request_timeout,
+        )
+    if provider in {"deepl", "deep-l"}:
+        return DeepLProvider(
+            api_key=settings.api_key,
+            target_language=settings.target_language,
+            base_url=settings.base_url or "https://api-free.deepl.com/v2",
+            request_timeout=settings.request_timeout,
+        )
+    if provider in {"google", "google-translate", "google_translate"}:
+        return GoogleTranslateProvider(
+            api_key=settings.api_key,
+            target_language=settings.target_language,
+            base_url=settings.base_url or "https://translation.googleapis.com/language/translate/v2",
             request_timeout=settings.request_timeout,
         )
     raise ValueError(f"unsupported provider: {settings.provider}")

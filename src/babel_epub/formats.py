@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -46,6 +47,8 @@ CALIBRE_CONVERSION = {
     ".tcr",
 }
 NATIVE_OUTPUT = {".epub"}
+DEFAULT_CALIBRE_TIMEOUT_SECONDS = 600
+
 CALIBRE_OUTPUT = {
     ".azw3",
     ".docx",
@@ -71,6 +74,7 @@ class InputFormat:
         input_path: Path,
         output_epub: Path,
         converter_path: str | None = None,
+        conversion_timeout: float | int | str | None = None,
     ) -> dict:
         output_epub.parent.mkdir(parents=True, exist_ok=True)
         if self.conversion == "native":
@@ -89,7 +93,7 @@ class InputFormat:
                     f"{self.extension} input requires Calibre `ebook-convert`. "
                     "Install Calibre or convert the book to EPUB before using Babel."
                 )
-            run_calibre_conversion(command, input_path, output_epub)
+            run_calibre_conversion(command, input_path, output_epub, timeout=conversion_timeout)
             return self.metadata(input_path, output_epub, "calibre")
         raise BookFormatError(f"unsupported conversion path for {self.extension}")
 
@@ -127,7 +131,12 @@ def detect_input_format(path: Path) -> InputFormat:
     )
 
 
-def normalize_to_epub(input_path: Path, work_dir: Path, converter_path: str | None = None) -> dict:
+def normalize_to_epub(
+    input_path: Path,
+    work_dir: Path,
+    converter_path: str | None = None,
+    conversion_timeout: float | int | str | None = None,
+) -> dict:
     if not input_path.exists():
         raise FileNotFoundError(input_path)
     input_format = detect_input_format(input_path)
@@ -135,7 +144,12 @@ def normalize_to_epub(input_path: Path, work_dir: Path, converter_path: str | No
     epub_path = work_dir / "input.epub"
     original_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(input_path, original_path)
-    metadata = input_format.to_epub(original_path, epub_path, converter_path=converter_path)
+    metadata = input_format.to_epub(
+        original_path,
+        epub_path,
+        converter_path=converter_path,
+        conversion_timeout=conversion_timeout,
+    )
     metadata["original_path"] = original_path.name
     return metadata
 
@@ -163,6 +177,7 @@ def convert_epub_to_output(
     output_path: Path,
     output_format: str | None = None,
     converter_path: str | None = None,
+    conversion_timeout: float | int | str | None = None,
 ) -> dict:
     if not source_epub.exists():
         raise FileNotFoundError(source_epub)
@@ -190,7 +205,7 @@ def convert_epub_to_output(
             f"{extension} output requires Calibre `ebook-convert`. "
             "Install Calibre or choose EPUB output."
         )
-    run_calibre_conversion(command, source_epub, output_path)
+    run_calibre_conversion(command, source_epub, output_path, timeout=conversion_timeout)
     return output_metadata(output_path, extension, "calibre")
 
 
@@ -202,13 +217,38 @@ def output_metadata(output_path: Path, extension: str, method: str) -> dict:
     }
 
 
-def run_calibre_conversion(command: str, input_path: Path, output_epub: Path) -> None:
-    result = subprocess.run(
-        [command, str(input_path), str(output_epub)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+def calibre_timeout_seconds(value: float | int | str | None = None) -> float:
+    raw: object = value
+    if raw is None:
+        raw = os.environ.get("BABEL_CONVERSION_TIMEOUT", "").strip() or DEFAULT_CALIBRE_TIMEOUT_SECONDS
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise BookFormatError("Calibre conversion timeout must be a positive number of seconds") from exc
+    if timeout <= 0:
+        raise BookFormatError("Calibre conversion timeout must be a positive number of seconds")
+    return timeout
+
+
+def run_calibre_conversion(
+    command: str,
+    input_path: Path,
+    output_epub: Path,
+    timeout: float | int | str | None = None,
+) -> None:
+    timeout_seconds = calibre_timeout_seconds(timeout)
+    try:
+        result = subprocess.run(
+            [command, str(input_path), str(output_epub)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BookFormatError(
+            f"ebook-convert timed out after {timeout_seconds:g}s for {input_path.name}"
+        ) from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise BookFormatError(f"ebook-convert failed for {input_path.name}: {detail}")

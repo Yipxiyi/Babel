@@ -7,14 +7,68 @@ from pathlib import Path
 
 from babel_epub.glossary import (
     build_glossary_terms,
+    detect_deterministic_quality,
     detect_glossary_issues,
     render_glossary_markdown,
     repair_untranslated_terms,
 )
+from babel_epub.glossary_io import export_glossary_text, import_glossary_text, merge_glossary_terms
 from babel_epub.pipeline import write_jsonl
 
 
 class GlossaryTests(unittest.TestCase):
+    def test_glossary_import_export_round_trips_csv_tbx_and_markdown(self) -> None:
+        terms = [
+            {
+                "source": "Rook",
+                "translation": "鲁克",
+                "type": "person",
+                "aliases": ["Rook Barkwater"],
+                "frequency": 7,
+                "evidence": ["Rook walked."],
+                "status": "approved",
+                "confidence": 0.95,
+                "locked": True,
+            },
+            {
+                "source": "Deepwoods",
+                "translation": "深林",
+                "type": "place",
+                "aliases": [],
+                "frequency": 3,
+                "evidence": [],
+                "status": "pending",
+                "confidence": 0.72,
+                "locked": False,
+            },
+        ]
+
+        for fmt in ("csv", "tbx", "md"):
+            exported = export_glossary_text(terms, fmt, target_language="Simplified Chinese")
+            imported = import_glossary_text(exported, fmt)
+            by_source = {term["source"]: term for term in imported}
+            self.assertEqual(by_source["Rook"]["translation"], "鲁克")
+            self.assertEqual(by_source["Rook"]["status"], "approved")
+            self.assertTrue(by_source["Rook"]["locked"])
+            self.assertEqual(by_source["Deepwoods"]["translation"], "深林")
+
+        japanese_tbx = export_glossary_text(
+            [{"source": "Rook", "translation": "ルーク", "status": "approved", "locked": True}],
+            "tbx",
+            target_language="Japanese",
+        )
+        japanese_terms = import_glossary_text(japanese_tbx, "tbx")
+        self.assertEqual(japanese_terms[0]["source"], "Rook")
+        self.assertEqual(japanese_terms[0]["translation"], "ルーク")
+
+        merged = merge_glossary_terms(
+            [{"source": "Rook", "translation": "旧译", "status": "approved", "locked": True}],
+            [{"source": "Rook", "translation": "鲁克", "status": "pending", "locked": False}],
+        )
+        self.assertEqual(merged[0]["translation"], "鲁克")
+        self.assertEqual(merged[0]["status"], "approved")
+        self.assertTrue(merged[0]["locked"])
+
     def test_structured_glossary_filters_noise_and_locks_known_terms(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pipeline_dir = Path(tmp)
@@ -44,7 +98,7 @@ class GlossaryTests(unittest.TestCase):
                 ],
             )
 
-            terms = build_glossary_terms(pipeline_dir, "Simplified Chinese")
+            terms = build_glossary_terms(pipeline_dir, "Simplified Chinese", glossary_preset="edge-chronicles")
             by_source = {term["source"]: term for term in terms}
             markdown = render_glossary_markdown("Simplified Chinese", terms)
 
@@ -67,6 +121,29 @@ class GlossaryTests(unittest.TestCase):
             self.assertEqual(by_source["Wumeru"]["translation"], "")
             self.assertIn("| Rook | 鲁克 |", markdown)
             self.assertTrue((pipeline_dir / "glossary_terms.json").exists())
+
+
+    def test_default_glossary_does_not_use_project_specific_preset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pipeline_dir = Path(tmp)
+            write_jsonl(
+                pipeline_dir / "blocks.jsonl",
+                [
+                    {"id": "chapter.xhtml::0001", "source_text": "Rook met Rook in the Deepwoods."},
+                    {"id": "chapter.xhtml::0002", "source_text": "Rook saw the Deepwoods again."},
+                ],
+            )
+
+            terms = build_glossary_terms(pipeline_dir, "Simplified Chinese")
+            by_source = {term["source"]: term for term in terms}
+
+            self.assertIn("Rook", by_source)
+            self.assertEqual(by_source["Rook"]["translation"], "")
+            self.assertEqual(by_source["Rook"]["status"], "pending")
+            self.assertIn("Deepwoods", by_source)
+            self.assertEqual(by_source["Deepwoods"]["translation"], "")
+            self.assertEqual(by_source["Deepwoods"]["status"], "pending")
+            self.assertEqual(by_source["Deepwoods"]["type"], "person")
 
     def test_structured_glossary_filters_modern_dialogue_noise(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -197,7 +274,7 @@ class GlossaryTests(unittest.TestCase):
                 ],
             )
 
-            terms = build_glossary_terms(pipeline_dir, "Simplified Chinese")
+            terms = build_glossary_terms(pipeline_dir, "Simplified Chinese", glossary_preset="edge-chronicles")
             by_source = {term["source"]: term for term in terms}
 
             self.assertIn("Rook", by_source)
@@ -255,6 +332,68 @@ class GlossaryTests(unittest.TestCase):
                 "Wuh-wuh",
             ):
                 self.assertNotIn(noise, by_source)
+
+    def test_deterministic_quality_flags_untranslated_punctuation_and_person_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pipeline_dir = Path(tmp)
+            write_jsonl(
+                pipeline_dir / "batches" / "batch_001_chapter_01.jsonl",
+                [
+                    {
+                        "id": "chapter.xhtml::0001",
+                        "source_text": 'Lyra whispered, "The ancient door remained completely silent tonight."',
+                        "source_html": '<p>Lyra whispered, "The ancient door remained completely silent tonight."</p>',
+                    }
+                ],
+            )
+            write_jsonl(
+                pipeline_dir / "translated" / "batch_001_chapter_01.translated.jsonl",
+                [
+                    {
+                        "id": "chapter.xhtml::0001",
+                        "translated_html": "<p>她低声说：The ancient door remained completely silent tonight.</p>",
+                    }
+                ],
+            )
+            (pipeline_dir / "batch_manifest.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "batch": 1,
+                            "chapter_label": "Chapter 1",
+                            "input": "batches/batch_001_chapter_01.jsonl",
+                            "output": "translated/batch_001_chapter_01.translated.jsonl",
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            terms = [
+                {
+                    "source": "Lyra",
+                    "translation": "莱拉",
+                    "type": "person",
+                    "aliases": [],
+                    "frequency": 1,
+                    "evidence": [],
+                    "status": "approved",
+                    "confidence": 0.95,
+                    "locked": True,
+                }
+            ]
+
+            report = detect_deterministic_quality(pipeline_dir, terms)
+            kinds = {issue["kind"] for issue in report["issues"]}
+
+            self.assertEqual(report["row_count"], 1)
+            self.assertGreater(report["untranslated_ratio"], 0)
+            self.assertEqual(report["blocking_count"], 1)
+            self.assertEqual(report["nonblocking_count"], 2)
+            self.assertIn("long-untranslated-segment", kinds)
+            self.assertIn("punctuation-quote-drift", kinds)
+            self.assertIn("person-name-drift", kinds)
+            self.assertEqual(report["chapter_summary_consistency"]["chapters_with_issues"], 1)
 
     def test_ai_qa_detects_and_repairs_untranslated_locked_terms(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

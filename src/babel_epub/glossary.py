@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from importlib import resources
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from html import unescape
@@ -309,109 +310,67 @@ LOWER_FALSE_POSITIVES = {
     "translation",
 }
 
-KNOWN_TRANSLATIONS = {
-    "Alquix": "阿尔奎克斯",
-    "Alquix Venvax": "阿尔奎克斯·文瓦克斯",
-    "Banderbear": "班德熊",
-    "Banderbears": "班德熊",
-    "banderbear": "班德熊",
-    "banderbears": "班德熊",
-    "Barkwater": "巴克沃特",
-    "Captain Twig": "特威格船长",
-    "Deepwoods": "深林",
-    "Felix": "费利克斯",
-    "Felix Lodd": "费利克斯·洛德",
-    "Free Glades": "自由林地",
-    "Great Mire Road": "大沼泽路",
-    "Great Storm Chamber": "大风暴室",
-    "Great Storm Chamber Library": "大风暴室图书馆",
-    "Guardians of Night": "夜之守护者",
-    "Hekkle": "赫克尔",
-    "High Academe": "至高学阀",
-    "Lake Landing": "湖岸",
-    "Lufwood Bridge": "卢夫木桥",
-    "Lodd": "洛德",
-    "Magda": "玛格达",
-    "Magda Burlix": "玛格达·伯利克斯",
-    "Most High Academe": "至高学阀",
-    "Rook": "鲁克",
-    "Rook Barkwater": "鲁克·巴克沃特",
-    "Sanctaphrax": "圣弗拉克斯",
-    "Skyraider": "天空劫掠者",
-    "Stob": "斯托布",
-    "Stob Lummus": "斯托布·拉穆斯",
-    "Stormhornet": "风暴蜂",
-    "Twig": "特威格",
-    "Undertown": "下城镇",
-    "Vox Verlix": "沃克斯·维尔利克斯",
-    "Varis": "瓦里斯",
-    "Varis Lodd": "瓦里斯·洛德",
-    "Xanth": "赞斯",
-}
 
-KNOWN_SOURCE_TERMS = tuple(
-    sorted(
-        (term for term in KNOWN_TRANSLATIONS if any(part[:1].islower() for part in term.split())),
-        key=lambda item: (-len(item.split()), -len(item)),
+
+@dataclass(frozen=True)
+class GlossaryPreset:
+    translations: dict[str, str] = field(default_factory=dict)
+    title_words: frozenset[str] = frozenset()
+    place_words: frozenset[str] = frozenset()
+    org_words: frozenset[str] = frozenset()
+    creature_words: frozenset[str] = frozenset()
+
+    @property
+    def known_source_terms(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                (
+                    term
+                    for term in self.translations
+                    if any(part[:1].islower() for part in term.split())
+                ),
+                key=lambda item: (-len(item.split()), -len(item)),
+            )
+        )
+
+
+EMPTY_GLOSSARY_PRESET = GlossaryPreset()
+
+
+def _preset_from_payload(payload: dict) -> GlossaryPreset:
+    translations = payload.get("translations", {})
+    if not isinstance(translations, dict):
+        translations = {}
+    return GlossaryPreset(
+        translations={str(key): str(value) for key, value in translations.items()},
+        title_words=frozenset(str(value) for value in payload.get("title_words", []) if str(value).strip()),
+        place_words=frozenset(str(value) for value in payload.get("place_words", []) if str(value).strip()),
+        org_words=frozenset(str(value) for value in payload.get("org_words", []) if str(value).strip()),
+        creature_words=frozenset(str(value).lower() for value in payload.get("creature_words", []) if str(value).strip()),
     )
-)
 
-TITLE_WORDS = {
-    "Academe",
-    "Captain",
-    "Guardian",
-    "Guardians",
-    "High",
-    "Knight",
-    "Librarian",
-    "Master",
-    "Mistress",
-    "Professor",
-}
-PLACE_WORDS = {
-    "Bridge",
-    "Chamber",
-    "Deepwoods",
-    "Edge",
-    "Edgelands",
-    "Gate",
-    "Glade",
-    "Glades",
-    "Gardens",
-    "Landing",
-    "Library",
-    "Market",
-    "Mire",
-    "Nest",
-    "Pastures",
-    "Road",
-    "Roost",
-    "Sanctaphrax",
-    "Sky",
-    "Tower",
-    "Town",
-    "Undertown",
-    "Valley",
-    "Woods",
-}
-ORG_WORDS = {"Academe", "Academics", "Guardians", "Library", "Nations", "Sisterhood"}
-CREATURE_WORDS = {
-    "banderbear",
-    "banderbears",
-    "cowlquape",
-    "gobrat",
-    "hammelhorn",
-    "lugtroll",
-    "prowlgrin",
-    "ratbird",
-    "shryke",
-    "shrykes",
-    "stormhornet",
-    "vulpoon",
-    "woodwasp",
-    "woodhog",
-    "woodmoth",
-}
+
+def load_glossary_preset(preset: str | Path | None = None) -> GlossaryPreset:
+    if not preset:
+        return EMPTY_GLOSSARY_PRESET
+    value = str(preset).strip()
+    if not value:
+        return EMPTY_GLOSSARY_PRESET
+    path = Path(value).expanduser()
+    if path.exists():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"glossary preset must be a JSON object: {path}")
+        return _preset_from_payload(payload)
+    filename = value if value.endswith(".json") else f"{value}.json"
+    try:
+        resource = resources.files("babel_epub.presets").joinpath(filename)
+        payload = json.loads(resource.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"unknown glossary preset: {value}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"glossary preset must be a JSON object: {value}")
+    return _preset_from_payload(payload)
 
 
 @dataclass
@@ -483,16 +442,16 @@ def clean_evidence(value: str, term: str = "", limit: int = 160) -> str:
     return compact[:limit]
 
 
-def classify_term(term: str) -> str:
+def classify_term(term: str, preset: GlossaryPreset = EMPTY_GLOSSARY_PRESET) -> str:
     lowered = term.lower()
     parts = term.split()
-    if lowered in CREATURE_WORDS or any(part.lower() in CREATURE_WORDS for part in parts):
+    if lowered in preset.creature_words or any(part.lower() in preset.creature_words for part in parts):
         return "creature"
-    if any(part in TITLE_WORDS for part in parts):
+    if any(part in preset.title_words for part in parts):
         return "title"
-    if any(part in ORG_WORDS for part in parts) and len(parts) > 1:
+    if any(part in preset.org_words for part in parts) and len(parts) > 1:
         return "organization"
-    if any(part in PLACE_WORDS for part in parts):
+    if any(part in preset.place_words for part in parts):
         return "place"
     if len(parts) >= 2 and all(part[:1].isupper() for part in parts):
         return "person"
@@ -501,8 +460,8 @@ def classify_term(term: str) -> str:
     return "special"
 
 
-def term_confidence(term: str, term_type: str, frequency: int) -> float:
-    if term in KNOWN_TRANSLATIONS:
+def term_confidence(term: str, term_type: str, frequency: int, preset: GlossaryPreset = EMPTY_GLOSSARY_PRESET) -> float:
+    if term in preset.translations:
         return 0.95
     if term_type in {"place", "organization", "title"} and len(term.split()) > 1 and frequency >= 5:
         return 0.74
@@ -515,27 +474,27 @@ def term_confidence(term: str, term_type: str, frequency: int) -> float:
     return 0.45
 
 
-def suggest_translation(term: str, term_type: str) -> str:
+def suggest_translation(term: str, term_type: str, preset: GlossaryPreset = EMPTY_GLOSSARY_PRESET) -> str:
     del term_type
-    if term in KNOWN_TRANSLATIONS:
-        return KNOWN_TRANSLATIONS[term]
+    if term in preset.translations:
+        return preset.translations[term]
     # Keep unknown terms reviewable instead of creating bad automatic hard constraints.
     return ""
 
 
-def collect_term_counts(blocks: list[dict]) -> tuple[Counter[str], dict[str, list[str]]]:
+def collect_term_counts(blocks: list[dict], preset: GlossaryPreset = EMPTY_GLOSSARY_PRESET) -> tuple[Counter[str], dict[str, list[str]]]:
     counts: Counter[str] = Counter()
     evidence: dict[str, list[str]] = defaultdict(list)
     for block in blocks:
         text = str(block.get("source_text", ""))
-        for known in KNOWN_SOURCE_TERMS:
+        for known in preset.known_source_terms:
             if contains_term(text, known):
                 counts[known] += 1
                 if len(evidence[known]) < 3:
                     evidence[known].append(clean_evidence(text, known))
         for match in NAME_RE.findall(text):
             term = normalize_term(match)
-            if should_skip_name_candidate(term):
+            if should_skip_name_candidate(term, preset.translations):
                 continue
             if all(part in COMMON_FALSE_POSITIVES for part in term.split()):
                 continue
@@ -544,7 +503,7 @@ def collect_term_counts(blocks: list[dict]) -> tuple[Counter[str], dict[str, lis
                 evidence[term].append(clean_evidence(text, term))
         for match in LOWER_TERM_RE.findall(text):
             term = normalize_term(match.lower())
-            if term in LOWER_FALSE_POSITIVES or term not in CREATURE_WORDS:
+            if term in LOWER_FALSE_POSITIVES or term not in preset.creature_words:
                 continue
             counts[term] += 1
             if len(evidence[term]) < 3:
@@ -552,10 +511,10 @@ def collect_term_counts(blocks: list[dict]) -> tuple[Counter[str], dict[str, lis
     return counts, evidence
 
 
-def should_skip_name_candidate(term: str) -> bool:
+def should_skip_name_candidate(term: str, known_translations: dict[str, str] | None = None) -> bool:
     if not term:
         return True
-    if term in KNOWN_TRANSLATIONS:
+    if known_translations and term in known_translations:
         return False
     normalized = normalize_term(term)
     parts = normalized.split()
@@ -576,24 +535,29 @@ def should_skip_name_candidate(term: str) -> bool:
     return False
 
 
-def build_glossary_terms(pipeline_dir: Path, target_language: str = "Simplified Chinese") -> list[dict]:
+def build_glossary_terms(
+    pipeline_dir: Path,
+    target_language: str = "Simplified Chinese",
+    glossary_preset: str | Path | None = None,
+) -> list[dict]:
     del target_language
+    preset = load_glossary_preset(glossary_preset)
     blocks = read_jsonl(pipeline_dir / "blocks.jsonl")
-    counts, evidence = collect_term_counts(blocks)
+    counts, evidence = collect_term_counts(blocks, preset)
     terms: list[GlossaryTerm] = []
     for source, frequency in counts.most_common():
-        if frequency < 2 and source not in KNOWN_TRANSLATIONS:
+        if frequency < 2 and source not in preset.translations:
             continue
-        term_type = classify_term(source)
-        confidence = term_confidence(source, term_type, frequency)
-        translation = suggest_translation(source, term_type)
+        term_type = classify_term(source, preset)
+        confidence = term_confidence(source, term_type, frequency, preset)
+        translation = suggest_translation(source, term_type, preset)
         status = "approved" if confidence >= 0.9 and translation else "pending"
         terms.append(
             GlossaryTerm(
                 source=source,
                 translation=translation,
                 type=term_type,
-                aliases=aliases_for(source, counts),
+                aliases=aliases_for(source, counts, preset),
                 frequency=frequency,
                 evidence=evidence.get(source, []),
                 status=status,
@@ -606,7 +570,7 @@ def build_glossary_terms(pipeline_dir: Path, target_language: str = "Simplified 
     return payload
 
 
-def aliases_for(source: str, counts: Counter[str]) -> list[str]:
+def aliases_for(source: str, counts: Counter[str], preset: GlossaryPreset = EMPTY_GLOSSARY_PRESET) -> list[str]:
     aliases: list[str] = []
     possessive = f"{source}’s"
     if possessive in counts:
@@ -614,9 +578,9 @@ def aliases_for(source: str, counts: Counter[str]) -> list[str]:
     words = source.split()
     if (
         len(words) > 1
-        and classify_term(source) == "person"
+        and classify_term(source, preset) == "person"
         and words[0] in counts
-        and not should_skip_name_candidate(words[0])
+        and not should_skip_name_candidate(words[0], preset.translations)
     ):
         aliases.append(words[0])
     return aliases[:4]
@@ -800,6 +764,243 @@ def detect_glossary_issues(pipeline_dir: Path, terms: list[dict]) -> list[dict]:
                     )
     return issues
 
+
+
+LONG_UNTRANSLATED_RE = re.compile(r"[A-Za-z][A-Za-z0-9'’,-]*(?:\s+[A-Za-z][A-Za-z0-9'’,-]*){4,}")
+SOURCE_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'’.-]{3,}")
+QUOTE_CHARS = '"“”‘’«»‹›「」『』'
+SENTENCE_PUNCTUATION = ".!?。！？"
+
+
+def detect_deterministic_quality(pipeline_dir: Path, terms: list[dict]) -> dict:
+    manifest_path = pipeline_dir / "batch_manifest.json"
+    if not manifest_path.exists():
+        return _empty_quality_report()
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _empty_quality_report()
+
+    person_terms = [term for term in compact_glossary_terms(terms) if term.get("type") == "person"]
+    issues: list[dict] = []
+    long_segments: list[dict] = []
+    punctuation_drift: list[dict] = []
+    person_name_drift: list[dict] = []
+    chapter_counts: dict[str, dict] = defaultdict(lambda: {"rows": 0, "issues": 0, "blocking": 0, "nonblocking": 0})
+    row_count = 0
+    source_char_count = 0
+    unchanged_source_chars = 0
+
+    for batch in manifest:
+        batch_rows = {row.get("id", ""): row for row in read_jsonl(pipeline_dir / batch.get("input", ""))}
+        translated_path = pipeline_dir / batch.get("output", "")
+        if not translated_path.exists():
+            continue
+        chapter_key = str(batch.get("chapter_label") or batch.get("file") or f"batch {batch.get('batch', '')}").strip()
+        if not chapter_key:
+            chapter_key = "unknown"
+        chapter = chapter_counts[chapter_key]
+        for translated in read_jsonl(translated_path):
+            row_id = str(translated.get("id", ""))
+            source_row = batch_rows.get(row_id, {})
+            source_text = _row_source_text(source_row)
+            translated_text = html_text(str(translated.get("translated_html", "")))
+            row_count += 1
+            chapter["rows"] += 1
+            source_char_count += len(re.sub(r"\s+", "", source_text))
+            unchanged_source_chars += _unchanged_source_char_count(source_text, translated_text)
+
+            for segment in _long_untranslated_segments(source_text, translated_text):
+                issue = _quality_issue(
+                    batch,
+                    row_id,
+                    "long-untranslated-segment",
+                    "blocking",
+                    "Long source-language segment remains in translated text",
+                    sample=segment,
+                )
+                issues.append(issue)
+                long_segments.append(issue)
+                _count_chapter_issue(chapter, issue)
+
+            punctuation_issue = _punctuation_quote_drift(batch, row_id, source_text, translated_text)
+            if punctuation_issue:
+                issues.append(punctuation_issue)
+                punctuation_drift.append(punctuation_issue)
+                _count_chapter_issue(chapter, punctuation_issue)
+
+            for issue in _person_name_drift(batch, row_id, source_text, translated_text, person_terms):
+                issues.append(issue)
+                person_name_drift.append(issue)
+                _count_chapter_issue(chapter, issue)
+
+    blocking_count = len([issue for issue in issues if issue.get("severity") == "blocking"])
+    nonblocking_count = len(issues) - blocking_count
+    chapter_summary = _chapter_summary(chapter_counts)
+    return {
+        "row_count": row_count,
+        "untranslated_ratio": round(unchanged_source_chars / source_char_count, 4) if source_char_count else 0.0,
+        "long_untranslated_segments": long_segments[:50],
+        "punctuation_quote_drift": punctuation_drift[:50],
+        "person_name_drift": person_name_drift[:50],
+        "chapter_summary_consistency": chapter_summary,
+        "sampled_llm_reviewer_findings": [],
+        "issue_count": len(issues),
+        "blocking_count": blocking_count,
+        "nonblocking_count": nonblocking_count,
+        "issues": issues[:200],
+    }
+
+
+def _empty_quality_report() -> dict:
+    return {
+        "row_count": 0,
+        "untranslated_ratio": 0.0,
+        "long_untranslated_segments": [],
+        "punctuation_quote_drift": [],
+        "person_name_drift": [],
+        "chapter_summary_consistency": {"chapters": 0, "chapters_with_issues": 0, "worst": []},
+        "sampled_llm_reviewer_findings": [],
+        "issue_count": 0,
+        "blocking_count": 0,
+        "nonblocking_count": 0,
+        "issues": [],
+    }
+
+
+def _row_source_text(row: dict) -> str:
+    source_text = str(row.get("source_text", ""))
+    if source_text:
+        return source_text
+    return html_text(str(row.get("source_html", "")))
+
+
+def _unchanged_source_char_count(source_text: str, translated_text: str) -> int:
+    seen: set[str] = set()
+    total = 0
+    for match in SOURCE_WORD_RE.finditer(source_text):
+        word = match.group(0).strip(".,;:!?()[]{}")
+        key = word.lower()
+        if len(word) < 4 or key in seen:
+            continue
+        seen.add(key)
+        if contains_term(translated_text, word):
+            total += len(word)
+    return total
+
+
+def _long_untranslated_segments(source_text: str, translated_text: str) -> list[str]:
+    source_compact = re.sub(r"\s+", " ", source_text).lower()
+    segments: list[str] = []
+    for match in LONG_UNTRANSLATED_RE.finditer(translated_text):
+        segment = re.sub(r"\s+", " ", match.group(0)).strip()
+        if len(segment) < 28:
+            continue
+        if segment.lower() in source_compact:
+            segments.append(segment[:220])
+    return segments[:3]
+
+
+def _punctuation_quote_drift(batch: dict, row_id: str, source_text: str, translated_text: str) -> dict | None:
+    source_profile = _punctuation_profile(source_text)
+    translated_profile = _punctuation_profile(translated_text)
+    changed = {
+        key: {"source": value, "translated": translated_profile.get(key, 0)}
+        for key, value in source_profile.items()
+        if value and translated_profile.get(key, 0) != value
+    }
+    if not changed:
+        return None
+    return _quality_issue(
+        batch,
+        row_id,
+        "punctuation-quote-drift",
+        "nonblocking",
+        "Punctuation or quote balance changed from source text",
+        details=changed,
+    )
+
+
+def _punctuation_profile(text: str) -> dict[str, int]:
+    return {
+        "quotes": sum(1 for char in text if char in QUOTE_CHARS),
+        "open_parentheses": text.count("(") + text.count("[") + text.count("{") + text.count("（"),
+        "close_parentheses": text.count(")") + text.count("]") + text.count("}") + text.count("）"),
+        "sentence_punctuation": sum(1 for char in text if char in SENTENCE_PUNCTUATION),
+    }
+
+
+def _person_name_drift(
+    batch: dict,
+    row_id: str,
+    source_text: str,
+    translated_text: str,
+    person_terms: list[dict],
+) -> list[dict]:
+    issues = []
+    for term in person_terms:
+        source = term.get("source", "")
+        translation = term.get("translation", "")
+        aliases = [source, *term.get("aliases", [])]
+        if not source or not translation:
+            continue
+        if not any(contains_term(source_text, alias) for alias in aliases):
+            continue
+        if translation in translated_text or any(contains_term(translated_text, alias) for alias in aliases):
+            continue
+        issues.append(
+            _quality_issue(
+                batch,
+                row_id,
+                "person-name-drift",
+                "nonblocking",
+                f"Person name {source} is present in source but neither source nor translation appears in output",
+                source=source,
+                translation=translation,
+            )
+        )
+    return issues
+
+
+def _quality_issue(
+    batch: dict,
+    row_id: str,
+    kind: str,
+    severity: str,
+    message: str,
+    **details: object,
+) -> dict:
+    issue = {
+        "batch": batch.get("batch"),
+        "row_id": row_id,
+        "kind": kind,
+        "severity": severity,
+        "message": message,
+    }
+    issue.update({key: value for key, value in details.items() if value not in (None, "", [], {})})
+    return issue
+
+
+def _count_chapter_issue(chapter: dict, issue: dict) -> None:
+    chapter["issues"] += 1
+    if issue.get("severity") == "blocking":
+        chapter["blocking"] += 1
+    else:
+        chapter["nonblocking"] += 1
+
+
+def _chapter_summary(chapter_counts: dict[str, dict]) -> dict:
+    worst = [
+        {"chapter": chapter, **counts}
+        for chapter, counts in chapter_counts.items()
+        if counts.get("issues", 0)
+    ]
+    worst.sort(key=lambda item: (item["blocking"], item["issues"], item["rows"]), reverse=True)
+    return {
+        "chapters": len(chapter_counts),
+        "chapters_with_issues": len(worst),
+        "worst": worst[:10],
+    }
 
 def contains_term(text: str, term: str) -> bool:
     if not term:

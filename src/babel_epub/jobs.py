@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from .glossary import (
+    detect_deterministic_quality,
     detect_glossary_issues,
     glossary_summary,
     html_text,
@@ -22,6 +23,8 @@ from .glossary import (
     write_ai_quality_report,
     write_glossary_terms,
 )
+from .glossary_io import export_glossary_text, import_glossary_text, merge_glossary_terms
+from .memory import DEFAULT_MEMORY_PROJECT_ID, TranslationMemoryStore, memory_path_for, normalize_memory_project_id
 from .pipeline import (
     command_apply,
     command_audit,
@@ -35,7 +38,11 @@ from .pipeline import (
 from .formats import BookFormatError, normalize_extension, supported_output_extensions
 from .providers import (
     DEFAULT_MAX_CONCURRENCY,
+    BudgetExceededError,
     ProviderSettings,
+    RateLimitState,
+    estimate_cost,
+    estimate_rows_tokens,
     TranslationProvider,
     is_retryable_translation_error,
     make_provider,
@@ -109,6 +116,9 @@ class JobRequest:
     language: str = "zh-CN"
     output_format: str = ".epub"
     max_blocks: int = DEFAULT_MAX_BLOCKS
+    max_chars: int | None = None
+    max_tokens: int | None = None
+    glossary_preset: str = ""
 
 
 @dataclass
@@ -146,8 +156,11 @@ class BabelJob:
     ai_fix_summary: dict = field(default_factory=dict)
     glossary_summary: dict = field(default_factory=dict)
     usage_summary: dict = field(default_factory=dict)
+    memory_summary: dict = field(default_factory=dict)
+    memory_project_id: str = ""
     generated_title: str = ""
     title_source: str = "manual"
+    glossary_preset: str = ""
 
     def to_dict(self, include_paths: bool = True) -> dict:
         data = asdict(self)
@@ -187,6 +200,10 @@ class BabelJobEngine:
         self.provider_factory = provider_factory
         self._jobs: dict[str, BabelJob] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._rate_limiters: dict[str, RateLimitState] = {}
+        self._memory_stores: dict[Path, TranslationMemoryStore] = {}
+        self._budget_locks: dict[str, threading.Lock] = {}
+        self._budget_reservations: dict[str, float] = {}
         self._lock = threading.Lock()
         self._load_existing_jobs()
 
@@ -252,16 +269,22 @@ class BabelJobEngine:
             ai_fix_summary=dict(data.get("ai_fix_summary") or {}),
             glossary_summary=dict(data.get("glossary_summary") or {}),
             usage_summary=dict(data.get("usage_summary") or {}),
+            memory_summary=dict(data.get("memory_summary") or {}),
+            memory_project_id=data.get("memory_project_id", ""),
             generated_title=data.get("generated_title", ""),
             title_source=data.get("title_source", "manual"),
+            glossary_preset=data.get("glossary_preset", ""),
         )
 
     def _save_job(self, job: BabelJob) -> None:
         job.work_dir.mkdir(parents=True, exist_ok=True)
-        (job.work_dir / "job.json").write_text(
+        state_path = job.work_dir / "job.json"
+        tmp_path = state_path.with_suffix(".json.tmp")
+        tmp_path.write_text(
             json.dumps(job.to_dict(), ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        tmp_path.replace(state_path)
 
     def _set_job(self, job: BabelJob) -> BabelJob:
         with self._lock:
@@ -300,22 +323,204 @@ class BabelJobEngine:
         ]
         self._set_active_current(job)
 
-    def _record_provider_usage(self, job_id: str, provider: TranslationProvider, scope: str) -> None:
-        usage = provider.usage_snapshot()
-        if not usage:
+    def _record_provider_usage(
+        self,
+        job_id: str,
+        provider: TranslationProvider,
+        scope: str,
+        settings: ProviderSettings | None = None,
+        estimated: dict | None = None,
+    ) -> None:
+        snapshot = provider.usage_snapshot()
+        baseline = dict(getattr(provider, "_babel_recorded_usage", {}))
+        usage = {
+            key: max(0, int(snapshot.get(key, 0)) - int(baseline.get(key, 0)))
+            for key in ("requests", "prompt_tokens", "completion_tokens", "total_tokens")
+        }
+        provider._babel_recorded_usage = snapshot  # type: ignore[attr-defined]
+        estimated = dict(estimated or {})
+        if not any(usage.values()) and not estimated:
             return
+        actual_cost = 0.0
+        estimated_cost_value = 0.0
+        if settings is not None:
+            actual_cost = estimate_cost(
+                settings,
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+            )
+            estimated_cost_value = estimate_cost(
+                settings,
+                int(estimated.get("prompt_tokens", 0)),
+                int(estimated.get("completion_tokens", 0)),
+            )
 
         def mutate(job: BabelJob) -> None:
             current = dict(job.usage_summary or {})
-            for key in ("requests", "prompt_tokens", "completion_tokens", "total_tokens"):
-                current[key] = int(current.get(key, 0)) + int(usage.get(key, 0))
             by_scope = dict(current.get("by_scope") or {})
             scoped = dict(by_scope.get(scope) or {})
             for key in ("requests", "prompt_tokens", "completion_tokens", "total_tokens"):
-                scoped[key] = int(scoped.get(key, 0)) + int(usage.get(key, 0))
+                if usage.get(key):
+                    current[key] = int(current.get(key, 0)) + int(usage.get(key, 0))
+                    scoped[key] = int(scoped.get(key, 0)) + int(usage.get(key, 0))
+            if estimated:
+                current["estimated_requests"] = int(current.get("estimated_requests", 0)) + 1
+                scoped["estimated_requests"] = int(scoped.get("estimated_requests", 0)) + 1
+                for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    estimate_key = f"estimated_{key}"
+                    current[estimate_key] = int(current.get(estimate_key, 0)) + int(estimated.get(key, 0))
+                    scoped[estimate_key] = int(scoped.get(estimate_key, 0)) + int(estimated.get(key, 0))
+            if actual_cost:
+                current["actual_cost"] = round(float(current.get("actual_cost", 0.0)) + actual_cost, 6)
+                scoped["actual_cost"] = round(float(scoped.get("actual_cost", 0.0)) + actual_cost, 6)
+            if estimated_cost_value:
+                current["estimated_cost"] = round(float(current.get("estimated_cost", 0.0)) + estimated_cost_value, 6)
+                scoped["estimated_cost"] = round(float(scoped.get("estimated_cost", 0.0)) + estimated_cost_value, 6)
+            if settings is not None and settings.budget_limit:
+                current["budget_limit"] = float(settings.budget_limit)
+            current["budget_spent"] = round(
+                max(float(current.get("actual_cost", 0.0)), float(current.get("estimated_cost", 0.0))),
+                6,
+            )
             by_scope[scope] = scoped
             current["by_scope"] = by_scope
             job.usage_summary = current
+
+        self._mutate_job(job_id, mutate)
+
+    def _rate_limiter_for(self, job_id: str, settings: ProviderSettings) -> RateLimitState:
+        key = job_id
+        with self._lock:
+            limiter = self._rate_limiters.get(key)
+            if limiter is None:
+                limiter = RateLimitState(settings.max_requests_per_minute, settings.max_tokens_per_minute)
+                self._rate_limiters[key] = limiter
+            return limiter
+
+    def _enforce_provider_budget(
+        self,
+        job_id: str,
+        settings: ProviderSettings,
+        estimated: dict,
+        scope: str,
+        batch: dict | None = None,
+    ) -> None:
+        estimated_cost_value = estimate_cost(
+            settings,
+            int(estimated.get("prompt_tokens", 0)),
+            int(estimated.get("completion_tokens", 0)),
+        )
+        if not settings.budget_limit or not estimated_cost_value:
+            return
+        current_job = self.get_job(job_id)
+        usage = dict(current_job.usage_summary or {})
+        spent = max(float(usage.get("actual_cost", 0.0)), float(usage.get("estimated_cost", 0.0)))
+        reserved = float(self._budget_reservations.get(job_id, 0.0))
+        if spent + reserved + estimated_cost_value <= float(settings.budget_limit):
+            return
+        message = (
+            f"Provider budget would be exceeded for {scope}: "
+            f"spent or reserved ${spent + reserved:.6f}, next request estimated ${estimated_cost_value:.6f}, "
+            f"limit ${float(settings.budget_limit):.6f}."
+        )
+
+        def mutate(job: BabelJob) -> None:
+            current = dict(job.usage_summary or {})
+            current["budget_limit"] = float(settings.budget_limit)
+            current["budget_spent"] = round(spent, 6)
+            current["budget_exceeded"] = True
+            job.usage_summary = current
+            self._append_event(job, "budget-stop", message, batch=batch)
+
+        self._mutate_job(job_id, mutate)
+        raise BudgetExceededError(message)
+
+    def _provider_translate_once(
+        self,
+        job_id: str,
+        settings: ProviderSettings,
+        provider: TranslationProvider,
+        rows: list[dict],
+        glossary: str,
+        context: str,
+        scope: str,
+        batch: dict | None = None,
+    ) -> list[dict]:
+        estimated = estimate_rows_tokens(rows, glossary, context)
+        estimated_cost_value = estimate_cost(
+            settings,
+            int(estimated.get("prompt_tokens", 0)),
+            int(estimated.get("completion_tokens", 0)),
+        )
+        budget_lock: threading.Lock | None = None
+        if settings.budget_limit and estimated_cost_value:
+            with self._lock:
+                budget_lock = self._budget_locks.setdefault(job_id, threading.Lock())
+            with budget_lock:
+                self._enforce_provider_budget(job_id, settings, estimated, scope, batch=batch)
+                self._budget_reservations[job_id] = (
+                    float(self._budget_reservations.get(job_id, 0.0)) + estimated_cost_value
+                )
+        limiter = self._rate_limiter_for(job_id, settings)
+        delay = limiter.acquire(int(estimated.get("total_tokens", 0)))
+        if delay:
+            self._mutate_job(
+                job_id,
+                lambda job: self._append_event(
+                    job,
+                    "rate-limit",
+                    f"Waited {delay:.1f}s for provider rate limits.",
+                    batch=batch,
+                    delay_seconds=round(delay, 3),
+                ),
+            )
+        try:
+            return provider.translate_batch(rows, glossary=glossary, context=context)
+        finally:
+            if budget_lock is None:
+                self._record_provider_usage(job_id, provider, scope, settings=settings, estimated=estimated)
+            else:
+                with budget_lock:
+                    try:
+                        self._record_provider_usage(job_id, provider, scope, settings=settings, estimated=estimated)
+                    finally:
+                        remaining = max(
+                            0.0,
+                            float(self._budget_reservations.get(job_id, 0.0)) - estimated_cost_value,
+                        )
+                        if remaining:
+                            self._budget_reservations[job_id] = remaining
+                        else:
+                            self._budget_reservations.pop(job_id, None)
+
+    def _memory_store_for(self, settings: ProviderSettings) -> TranslationMemoryStore | None:
+        if not settings.memory_enabled:
+            return None
+        project_id = normalize_memory_project_id(settings.memory_project_id or DEFAULT_MEMORY_PROJECT_ID)
+        path = memory_path_for(self.data_dir, project_id=project_id, memory_path=settings.memory_path or None)
+        resolved_path = path.resolve()
+        with self._lock:
+            store = self._memory_stores.get(resolved_path)
+            if store is None:
+                store = TranslationMemoryStore(resolved_path, project_id=project_id)
+                self._memory_stores[resolved_path] = store
+            return store
+
+    def _record_memory_event(
+        self,
+        job_id: str,
+        event_type: str,
+        message: str,
+        memory_store: TranslationMemoryStore,
+        batch: dict | None = None,
+        **details: object,
+    ) -> None:
+        stats = memory_store.stats()
+
+        def mutate(job: BabelJob) -> None:
+            job.memory_summary = stats
+            job.memory_project_id = str(stats.get("project_id", ""))
+            self._append_event(job, event_type, message, batch=batch, **details)
 
         self._mutate_job(job_id, mutate)
 
@@ -419,6 +624,9 @@ class BabelJobEngine:
                 glossary=glossary_path,
                 target_language=request.target_language,
                 max_blocks=request.max_blocks,
+                max_chars=request.max_chars,
+                max_tokens=request.max_tokens,
+                glossary_preset=request.glossary_preset,
                 force=True,
             )
         )
@@ -444,6 +652,7 @@ class BabelJobEngine:
             message="Prepared. Review glossary, then start translation.",
             glossary_summary=glossary_summary(terms),
             title_source="manual" if request.title else "suffix",
+            glossary_preset=request.glossary_preset,
         )
         self._append_event(job, "prepared", f"Prepared {len(manifest)} batches from {len(blocks)} blocks.")
         return self._set_job(job)
@@ -474,7 +683,7 @@ class BabelJobEngine:
             pipeline_dir = job.work_dir / "pipeline"
             from .glossary import build_glossary_terms
 
-            terms = build_glossary_terms(pipeline_dir, job.target_language)
+            terms = build_glossary_terms(pipeline_dir, job.target_language, glossary_preset=job.glossary_preset)
         job.glossary_path.write_text(
             render_glossary_markdown(job.target_language, terms),
             encoding="utf-8",
@@ -501,6 +710,39 @@ class BabelJobEngine:
         job.message = "Glossary terms updated."
         self._append_event(job, "glossary", "Structured glossary terms updated.")
         return self._set_job(job)
+
+    def import_glossary_terms(
+        self,
+        job_id: str,
+        content: str,
+        fmt: str = "csv",
+        default_status: str = "pending",
+        mode: str = "upsert",
+    ) -> tuple[BabelJob, list[dict], dict]:
+        job = self.get_job(job_id)
+        imported = import_glossary_text(content, fmt, default_status=default_status)
+        existing = self.read_glossary_terms(job_id)
+        merged = merge_glossary_terms(existing, imported, mode=mode)
+        normalized = write_glossary_terms(job.work_dir, merged)
+        job.glossary_path.write_text(
+            render_glossary_markdown(job.target_language, normalized),
+            encoding="utf-8",
+        )
+        job.glossary_summary = glossary_summary(normalized)
+        summary = {
+            "imported": len(imported),
+            "total": len(normalized),
+            "mode": mode,
+            "format": fmt,
+            "default_status": default_status,
+        }
+        job.message = f"Imported {len(imported)} glossary term{'s' if len(imported) != 1 else ''}."
+        self._append_event(job, "glossary-import", job.message, **summary)
+        return self._set_job(job), normalized, summary
+
+    def export_glossary_terms(self, job_id: str, fmt: str = "csv") -> str:
+        job = self.get_job(job_id)
+        return export_glossary_text(self.read_glossary_terms(job_id), fmt, target_language=job.target_language)
 
     def autofill_glossary_terms(self, job_id: str, settings: ProviderSettings) -> BabelJob:
         validate_provider_settings(settings)
@@ -531,7 +773,15 @@ class BabelJobEngine:
                 }
                 for index, term in batch
             ]
-            translated_rows = provider.translate_batch(rows, glossary=glossary, context=context)
+            translated_rows = self._provider_translate_once(
+                job_id,
+                settings,
+                provider,
+                rows,
+                glossary,
+                context,
+                "glossary",
+            )
             translated_by_id = {str(row.get("id", "")): row for row in translated_rows}
             for index, term in batch:
                 row = translated_by_id.get(f"glossary-term::{index}")
@@ -545,7 +795,6 @@ class BabelJobEngine:
                 term["translation"] = translation
                 term["locked"] = False
                 filled += 1
-        self._record_provider_usage(job_id, provider, "glossary")
 
         normalized = write_glossary_terms(job.work_dir, terms)
         job.glossary_path.write_text(
@@ -606,10 +855,8 @@ class BabelJobEngine:
         resume: bool = False,
         ai_qa_enabled: bool = True,
         auto_title_enabled: bool = False,
+        batch_filter: list[int] | None = None,
     ) -> BabelJob:
-        job = self.get_job(job_id)
-        if job.status == "running":
-            return job
         try:
             validate_provider_settings(settings)
         except ValueError as exc:
@@ -617,11 +864,24 @@ class BabelJobEngine:
             raise
         thread = threading.Thread(
             target=self.run_job,
-            args=(job_id, settings, resume, ai_qa_enabled, auto_title_enabled),
+            args=(job_id, settings, resume, ai_qa_enabled, auto_title_enabled, batch_filter),
             daemon=True,
         )
         with self._lock:
+            if job_id not in self._jobs:
+                raise KeyError(job_id)
+            job = self._jobs[job_id]
+            if job.status == "running":
+                return job
+            job.status = "running"
+            job.current_batch = None
+            job.active_batches = []
+            job.failed_batch = None
+            job.failed_batches = []
+            job.message = "Starting translation job."
+            self._append_event(job, "run-starting", job.message)
             self._threads[job_id] = thread
+            self._save_job(job)
         thread.start()
         return self.get_job(job_id)
 
@@ -633,6 +893,7 @@ class BabelJobEngine:
         batch: dict,
         glossary: str,
         context: str,
+        memory_store: TranslationMemoryStore | None = None,
     ) -> None:
         batch_rows = read_jsonl(pipeline_dir / batch["input"])
         out_path = pipeline_dir / batch["output"]
@@ -642,23 +903,67 @@ class BabelJobEngine:
         while True:
             self._start_batch(job_id, batch, attempt)
             try:
-                provider = self.provider_factory(settings)
-                try:
-                    translated_rows = self._translate_rows_with_safety_fallback(
-                        job_id,
-                        provider,
-                        batch,
-                        batch_rows,
-                        glossary,
-                        context,
-                    )
-                finally:
-                    self._record_provider_usage(job_id, provider, "translation")
+                memory_rows: list[dict] = []
+                rows_to_translate: list[dict] = []
+                if memory_store is not None:
+                    for row in batch_rows:
+                        hit = memory_store.lookup(row, settings.target_language)
+                        if hit is not None and not validate_translation_rows([row], [hit.row]):
+                            memory_rows.append(hit.row)
+                        else:
+                            rows_to_translate.append(row)
+                    if memory_rows:
+                        self._record_memory_event(
+                            job_id,
+                            "memory-hit",
+                            f"Reused {len(memory_rows)} row{'s' if len(memory_rows) != 1 else ''} from translation memory.",
+                            memory_store,
+                            batch=batch,
+                            hit_count=len(memory_rows),
+                        )
+                else:
+                    rows_to_translate = list(batch_rows)
+
+                provider_rows: list[dict] = []
+                if rows_to_translate:
+                    provider = self.provider_factory(settings)
+                    try:
+                        provider_rows = self._translate_rows_with_safety_fallback(
+                            job_id,
+                            settings,
+                            provider,
+                            batch,
+                            rows_to_translate,
+                            glossary,
+                            context,
+                        )
+                    finally:
+                        pass
+                    provider_rows = repair_translated_rows_structure(rows_to_translate, provider_rows)
+
+                translated_by_id = {str(row.get("id", "")): row for row in memory_rows + provider_rows}
+                translated_rows = [translated_by_id.get(str(row.get("id", "")), {}) for row in batch_rows]
                 translated_rows = repair_translated_rows_structure(batch_rows, translated_rows)
                 issues = validate_translation_rows(batch_rows, translated_rows)
                 if issues:
                     raise ValueError(f"{out_path} has validation issues:\n" + "\n".join(issues[:20]))
                 write_jsonl(out_path, translated_rows)
+                if memory_store is not None:
+                    written = memory_store.upsert_rows(
+                        batch_rows,
+                        translated_rows,
+                        target_language=settings.target_language,
+                        source_project=memory_store.project_id,
+                    )
+                    if written:
+                        self._record_memory_event(
+                            job_id,
+                            "memory-write",
+                            f"Wrote {written} row{'s' if written != 1 else ''} to translation memory.",
+                            memory_store,
+                            batch=batch,
+                            write_count=written,
+                        )
                 return
             except Exception as exc:
                 if attempt < max_attempts and is_retryable_translation_error(exc):
@@ -671,6 +976,7 @@ class BabelJobEngine:
     def _translate_rows_with_safety_fallback(
         self,
         job_id: str,
+        settings: ProviderSettings,
         provider: TranslationProvider,
         batch: dict,
         rows: list[dict],
@@ -678,7 +984,16 @@ class BabelJobEngine:
         context: str,
     ) -> list[dict]:
         try:
-            return provider.translate_batch(rows, glossary=glossary, context=context)
+            return self._provider_translate_once(
+                job_id,
+                settings,
+                provider,
+                rows,
+                glossary,
+                context,
+                "translation",
+                batch=batch,
+            )
         except Exception as exc:
             if len(rows) <= 1 or not is_provider_safety_rejection(exc):
                 raise
@@ -704,6 +1019,7 @@ class BabelJobEngine:
             translated.extend(
                 self._translate_rows_with_safety_fallback(
                     job_id,
+                    settings,
                     provider,
                     batch,
                     rows[offset : offset + chunk_size],
@@ -728,6 +1044,7 @@ class BabelJobEngine:
                 "remaining": 0,
                 "blocking_remaining": 0,
                 "nonblocking_remaining": 0,
+                "quality": detect_deterministic_quality(pipeline_dir, []),
                 "issues": [],
             }
             path = write_ai_quality_report(pipeline_dir, report)
@@ -774,17 +1091,22 @@ class BabelJobEngine:
             blocking = [issue for issue in remaining if issue.get("kind") == "untranslated-source-term"]
             if not blocking:
                 break
-        blocking_remaining = [issue for issue in remaining if issue.get("kind") == "untranslated-source-term"]
-        nonblocking_remaining = len(remaining) - len(blocking_remaining)
+        blocking_glossary_remaining = [issue for issue in remaining if issue.get("kind") == "untranslated-source-term"]
+        quality = detect_deterministic_quality(pipeline_dir, terms)
+        blocking_remaining_count = len(blocking_glossary_remaining) + int(quality.get("blocking_count", 0))
+        nonblocking_remaining = len(remaining) - len(blocking_glossary_remaining) + int(quality.get("nonblocking_count", 0))
+        combined_issues = [*remaining, *quality.get("issues", [])]
         report = {
             "enabled": True,
-            "status": "failed" if blocking_remaining else "passed",
-            "detected": total_detected,
+            "status": "failed" if blocking_remaining_count else "passed",
+            "detected": total_detected + int(quality.get("issue_count", 0)),
             "fixed": total_fixed,
-            "remaining": len(remaining),
-            "blocking_remaining": len(blocking_remaining),
+            "remaining": len(combined_issues),
+            "blocking_remaining": blocking_remaining_count,
             "nonblocking_remaining": nonblocking_remaining,
-            "issues": remaining[:200],
+            "glossary_issues": remaining[:200],
+            "quality": quality,
+            "issues": combined_issues[:200],
         }
         path = write_ai_quality_report(pipeline_dir, report)
 
@@ -796,20 +1118,24 @@ class BabelJobEngine:
                 "remaining": report["remaining"],
                 "blocking_remaining": report["blocking_remaining"],
                 "nonblocking_remaining": report["nonblocking_remaining"],
+                "untranslated_ratio": report["quality"].get("untranslated_ratio", 0.0),
+                "long_untranslated_segments": len(report["quality"].get("long_untranslated_segments", [])),
+                "punctuation_quote_drift": len(report["quality"].get("punctuation_quote_drift", [])),
+                "person_name_drift": len(report["quality"].get("person_name_drift", [])),
             }
             job.ai_fix_summary = {"fixed": total_fixed, "rounds": 2 if remaining else 1}
             message = (
-                f"AI QA fixed {total_fixed} rows; {len(blocking_remaining)} blocking issues remain."
-                if blocking_remaining
+                f"AI QA fixed {total_fixed} rows; {blocking_remaining_count} blocking issues remain."
+                if blocking_remaining_count
                 else f"AI QA fixed {total_fixed} rows; no blocking glossary issues remain."
             )
             self._append_event(job, "ai-qa-done", message)
 
         self._mutate_job(job_id, finish)
-        if blocking_remaining:
+        if blocking_remaining_count:
             raise RuntimeError(
-                "AI QA found untranslated locked terms after repair: "
-                + "; ".join(issue["message"] for issue in blocking_remaining[:5])
+                "AI QA found blocking quality issues after repair: "
+                + "; ".join(issue["message"] for issue in combined_issues if issue.get("severity", "blocking") == "blocking")[:500]
             )
 
     def _maybe_generate_title(
@@ -834,12 +1160,15 @@ class BabelJobEngine:
                     "source_html": f"<p>{escape(source_title)}</p>",
                 }
             ]
-            translated = provider.translate_batch(
+            translated = self._provider_translate_once(
+                job_id,
+                settings,
+                provider,
                 rows,
-                glossary=glossary,
-                context="Translate this ebook title naturally. Return only the translated title row.",
+                glossary,
+                "Translate this ebook title naturally. Return only the translated title row.",
+                "title",
             )
-            self._record_provider_usage(job_id, provider, "title")
             generated = html_text(str(translated[0].get("translated_html", ""))).strip()
         except Exception:
             generated = ""
@@ -890,6 +1219,7 @@ class BabelJobEngine:
                 output_epub=None,
                 output_format=output_format,
                 converter_path=None,
+                conversion_timeout=None,
                 title=job.title or None,
                 language=job.language,
             )
@@ -929,11 +1259,13 @@ class BabelJobEngine:
         resume: bool = False,
         ai_qa_enabled: bool = True,
         auto_title_enabled: bool = False,
+        batch_filter: list[int] | None = None,
     ) -> BabelJob:
         try:
             validate_provider_settings(settings)
             # Catch provider setup failures before marking the job as actively translating.
             provider = self.provider_factory(settings)
+            memory_store = self._memory_store_for(settings)
             job = self.get_job(job_id)
             pipeline_dir = job.work_dir / "pipeline"
             translated_dir = pipeline_dir / "translated"
@@ -944,9 +1276,19 @@ class BabelJobEngine:
             glossary = render_glossary_markdown(job.target_language, terms)
             job.glossary_path.write_text(glossary, encoding="utf-8")
             context = context_path.read_text(encoding="utf-8") if context_path.exists() else ""
-            valid_resume_batches = self._valid_resume_batch_numbers(pipeline_dir, manifest) if resume else set()
+            batch_filter_set = {int(value) for value in (batch_filter or []) if int(value) > 0} or None
+            valid_resume_batches = self._valid_resume_batch_numbers(pipeline_dir, manifest) if resume or batch_filter_set else set()
             max_concurrency = normalize_max_concurrency(settings.max_concurrency)
             self._mutate_job(job_id, lambda current: setattr(current, "usage_summary", {}))
+            with self._lock:
+                self._rate_limiters.pop(job_id, None)
+            if memory_store is not None:
+                self._record_memory_event(
+                    job_id,
+                    "memory-load",
+                    f"Loaded translation memory project {memory_store.project_id}.",
+                    memory_store,
+                )
             self._maybe_generate_title(job_id, settings, provider, glossary, auto_title_enabled)
 
             def start_mutation(job: BabelJob) -> None:
@@ -962,6 +1304,8 @@ class BabelJobEngine:
                 job.ai_qa_summary = {}
                 job.ai_fix_summary = {}
                 job.glossary_summary = glossary_summary(terms)
+                job.memory_summary = memory_store.stats() if memory_store is not None else {}
+                job.memory_project_id = memory_store.project_id if memory_store is not None else ""
                 job.message = (
                     f"Resuming translation with {job.completed_batches}/{job.total_batches} valid batches."
                     if resume
@@ -973,7 +1317,19 @@ class BabelJobEngine:
 
             candidates: list[dict] = []
             for batch in manifest:
-                if int(batch["batch"]) in valid_resume_batches:
+                batch_number = int(batch["batch"])
+                if batch_filter_set is not None and batch_number not in batch_filter_set:
+                    self._mutate_job(
+                        job_id,
+                        lambda current, skipped=batch: self._append_event(
+                            current,
+                            "batch-skip-filter",
+                            f"Skipping batch {skipped['batch']}/{current.total_batches}; outside batch filter.",
+                            batch=skipped,
+                        ),
+                    )
+                    continue
+                if batch_number in valid_resume_batches:
                     self._mutate_job(
                         job_id,
                         lambda current, skipped=batch: self._append_event(
@@ -998,6 +1354,7 @@ class BabelJobEngine:
                             batch,
                             glossary,
                             context,
+                            memory_store,
                         ): batch
                         for batch in candidates
                     }
@@ -1011,6 +1368,24 @@ class BabelJobEngine:
 
             if self.get_job(job_id).failed_batches:
                 return self._mark_job_failed_after_batches(job_id)
+            if batch_filter_set is not None:
+                valid_after_filter = self._valid_resume_batch_numbers(pipeline_dir, manifest)
+                if len(valid_after_filter) == len(manifest):
+                    return self._finalize_completed_job(job_id, pipeline_dir, ai_qa_enabled)
+
+                def filtered_done(job: BabelJob) -> None:
+                    job.status = "prepared"
+                    job.active_batches = []
+                    job.current_batch = None
+                    job.failed_batch = None
+                    job.failed_batches = []
+                    job.message = (
+                        f"Batch filter completed for {len(batch_filter_set)} batch"
+                        f"{'es' if len(batch_filter_set) != 1 else ''}; remaining batches are not complete."
+                    )
+                    self._append_event(job, "batch-filter-done", job.message)
+
+                return self._mutate_job(job_id, filtered_done)
             return self._finalize_completed_job(job_id, pipeline_dir, ai_qa_enabled)
         except Exception as exc:
             return self._mark_job_failed(job_id, exc)

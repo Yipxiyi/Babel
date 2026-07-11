@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from argparse import Namespace
 from pathlib import Path
 
@@ -9,6 +11,7 @@ from babel_epub.formats import (
     BookFormatError,
     convert_epub_to_output,
     detect_input_format,
+    run_calibre_conversion,
     supported_input_extensions,
     supported_output_extensions,
 )
@@ -130,6 +133,22 @@ class FormatTests(unittest.TestCase):
                     output_format=".pdf",
                     converter_path="/definitely/missing/ebook-convert",
                 )
+
+
+    def test_calibre_conversion_timeout_reports_clear_error(self) -> None:
+        with patch(
+            "babel_epub.formats.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="ebook-convert", timeout=0.01),
+        ) as run_mock:
+            with self.assertRaisesRegex(BookFormatError, "timed out after 0.01s"):
+                run_calibre_conversion(
+                    "ebook-convert",
+                    Path("input.azw3"),
+                    Path("output.epub"),
+                    timeout=0.01,
+                )
+
+        run_mock.assert_called_once()
 
     def test_epub_output_copies_without_external_converter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run unit tests
+        run: PYTHONPATH=src python -m unittest discover -s tests -v
+      - name: Compile Python modules
+        run: PYTHONPATH=src python -m py_compile src/babel_epub/*.py
+      - name: Validate Docker Compose
+        run: |
+          if command -v docker >/dev/null 2>&1; then
+            docker compose config
+          else
+            echo "Docker is not available; skipping compose validation."
+          fi
+
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install Web dependencies
+        run: npm ci --prefix web
+      - name: Run Web behavior tests
+        run: npm test --prefix web
+      - name: Build Web UI
+        run: npm run build --prefix web

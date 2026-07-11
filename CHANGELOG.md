@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.8.0 - 2026-07-11
+
+### Added
+
+- Optional Web/API bearer-token protection via `BABEL_WEB_TOKEN`, covering `/api/*` routes and artifact downloads without exposing the token in frontend metadata.
+- Configurable Web upload limit via `BABEL_MAX_UPLOAD_MB` with a 200 MB default and explicit 413 responses for oversized uploads.
+- Safe ZIP/EPUB extraction for prepare and audit paths, rejecting traversal, absolute paths, Windows drive paths, symlinks, and other unsafe archive entries.
+- EPUB3 `nav.xhtml` table-of-contents label extraction alongside existing EPUB2 NCX support.
+- Audit reporting for broken local media/resource references such as image, stylesheet, audio, video, source, object, script, and track links.
+- Optional glossary presets via CLI, Web/API jobs, and MCP, with the project-specific Edge Chronicles vocabulary moved out of the default glossary heuristics.
+- Dynamic batch sizing via `--max-chars` / `--max-tokens`, Web/API `max_chars`, and MCP prepare parameters, with source-size metadata recorded in `batch_manifest.json`.
+- Calibre conversion timeout support via `--conversion-timeout` and `BABEL_CONVERSION_TIMEOUT`.
+- Optional OpenAI-compatible JSON Schema response requests via `structured_output_enabled`, exposed in Web settings and MCP.
+- Lightweight Web behavior tests via `npm test --prefix web`, covering upload payloads, settings normalization, start/resume payloads, and glossary review state.
+- GitHub Actions CI for Python 3.11/3.12 unit tests and compile checks plus Web test/build validation.
+- Translation Memory project stores with exact source-snippet reuse, Web/MCP enablement fields, and CLI `babel-epub memory` import/export/stat commands.
+- Glossary import/export for CSV, TBX, Markdown preset, and JSON through CLI plus Web glossary modal import/export controls.
+- Deterministic QA report fields for untranslated ratio, long untranslated segments, punctuation/quote drift, person-name drift, and chapter-level issue grouping, surfaced in the Web validation panel.
+- Provider rate limits, token-cost budgeting, estimated/actual cost summaries, OpenAI Responses, Ollama/local aliases, and DeepL/Google Translate adapters.
+- MCP tools for job listing, artifact paths, structured glossary read/update/import/export, failed-job resume, `start_translation` batch filters, and single-batch retry.
+
+### Changed
+
+- Translated JSONL validation now rejects row-count mismatches, duplicate IDs, missing/extra IDs, out-of-order rows, non-string `translated_html`, and structural drift for `id`, `href`, `src`, `class`, `alt`, and `title` attributes.
+- Web job startup now marks jobs running under lock before spawning the background worker so repeated start requests cannot create multiple workers for one job.
+- Job state is written through a temporary file and atomic replace to reduce partial `job.json` writes, and corrupt existing `job.json` files are skipped during startup.
+- Translatable text detection is now Unicode-aware for CJK, Cyrillic, Arabic, and other scripts while still skipping numeric/punctuation-only and style-like values.
+- EPUB audits now scan `.xhtml`, `.html`, and `.htm` documents for IDs, internal links, and anchors.
+- Job translation now checks enabled Translation Memory before provider calls and writes validated translated rows back to the project memory.
+- Structured glossary updates now share one import/export normalization path so statuses and locked decisions survive round trips.
+- Web token protection now includes an in-app unlock flow and authenticated artifact downloads.
+- Provider validation no longer requires dummy model or API-key values for DeepL, Google Translate, Ollama, or local OpenAI-compatible endpoints.
+- Concurrent jobs coordinate provider budgets, rate limits, and shared Translation Memory stores safely.
+- EPUB3 navigation labels resolve relative to the navigation document, and TBX round trips preserve non-Chinese target languages.
+
 ## 0.7.2 - 2026-06-08
 
 ### Added

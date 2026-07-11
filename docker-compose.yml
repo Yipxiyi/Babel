@@ -8,6 +8,10 @@ services:
       BABEL_HOST: 0.0.0.0
       BABEL_PORT: 7860
       BABEL_DATA_DIR: /data
+      # Set these before exposing the service beyond localhost or a trusted network.
+      # BABEL_WEB_TOKEN: ${BABEL_WEB_TOKEN:-}
+      # BABEL_MAX_UPLOAD_MB: ${BABEL_MAX_UPLOAD_MB:-200}
+      # BABEL_CONVERSION_TIMEOUT: ${BABEL_CONVERSION_TIMEOUT:-600}
     volumes:
       - babel-data:/data
 

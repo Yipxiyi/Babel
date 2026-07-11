@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import posixpath
 import re
 import shutil
+import stat
 import sys
 import tempfile
+import unicodedata
 import zipfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -22,7 +25,8 @@ from typing import Iterable
 from xml.etree import ElementTree as ET
 
 from .formats import convert_epub_to_output, normalize_to_epub, write_input_format_metadata, write_output_format_metadata
-from .glossary import build_glossary_terms, normalize_term, render_glossary_markdown, should_skip_name_candidate
+from .glossary import build_glossary_terms, normalize_term, read_glossary_terms, render_glossary_markdown, should_skip_name_candidate, write_glossary_terms
+from .glossary_io import export_glossary_file, import_glossary_file, merge_glossary_terms
 
 
 XHTML_NS = "http://www.w3.org/1999/xhtml"
@@ -31,6 +35,7 @@ DC_NS = "http://purl.org/dc/elements/1.1/"
 NCX_NS = "http://www.daisy.org/z3986/2005/ncx/"
 CONTAINER_NS = "urn:oasis:names:tc:opendocument:xmlns:container"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
+EPUB_NS = "http://www.idpf.org/2007/ops"
 
 NS = {
     "x": XHTML_NS,
@@ -39,6 +44,7 @@ NS = {
     "ncx": NCX_NS,
     "c": CONTAINER_NS,
     "xml": XML_NS,
+    "epub": EPUB_NS,
 }
 
 ET.register_namespace("", XHTML_NS)
@@ -65,11 +71,26 @@ TEXT_TAGS = {
 }
 SKIP_TAGS = {"script", "style", "svg", "math"}
 STRUCTURAL_ATTRS = {"id", "class", "href", "src", "alt", "title"}
+HTML_DOCUMENT_EXTS = {".xhtml", ".html", ".htm"}
+RESOURCE_ATTRS_BY_TAG = {
+    "audio": ("src",),
+    "embed": ("src",),
+    "img": ("src",),
+    "image": ("href", "src"),
+    "link": ("href",),
+    "object": ("data",),
+    "script": ("src",),
+    "source": ("src", "srcset"),
+    "track": ("src",),
+    "video": ("src", "poster"),
+}
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z'’.-]*")
 NAME_RE = re.compile(
     r"\b[A-Z][a-z]+(?:[’'-][A-Z]?[a-z]+)?"
     r"(?:\s+[A-Z][a-z]+(?:[’'-][A-Z]?[a-z]+)?){0,3}\b"
 )
+ESTIMATED_CHARS_PER_TOKEN = 4
+
 PLACEHOLDER_RE = re.compile(
     r"(?:第\s*[0-9一二三四五六七八九十百]+\s*段\s*译文|"
     r"段译文|>\s*译文\s*<|"
@@ -130,6 +151,39 @@ class EpubPaths:
     opf_dir: Path
 
 
+
+def safe_extract(archive: zipfile.ZipFile, target_dir: Path) -> None:
+    """Extract a ZIP/EPUB archive without allowing path traversal or unsafe entries."""
+    root = target_dir.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    for info in archive.infolist():
+        name = info.filename
+        if not name or "\x00" in name:
+            raise ValueError("unsafe zip entry name")
+        normalized = name.replace("\\", "/")
+        if normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
+            raise ValueError(f"unsafe absolute zip entry: {name}")
+        parts = [part for part in normalized.split("/") if part]
+        if any(part == ".." for part in parts):
+            raise ValueError(f"unsafe zip entry path traversal: {name}")
+        mode = (info.external_attr >> 16) & 0o777777
+        if mode:
+            entry_type = stat.S_IFMT(mode)
+            if entry_type not in {0, stat.S_IFREG, stat.S_IFDIR}:
+                raise ValueError(f"unsafe zip entry file type: {name}")
+        destination = (root / normalized).resolve()
+        try:
+            destination.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"unsafe zip entry outside target: {name}") from exc
+        if info.is_dir() or normalized.endswith("/"):
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(info) as source, destination.open("wb") as output:
+            shutil.copyfileobj(source, output)
+
+
 def local_name(tag: str) -> str:
     if tag.startswith("{"):
         return tag.rsplit("}", 1)[1]
@@ -175,11 +229,15 @@ def has_translatable_text(text: str) -> bool:
     value = normalize_space(text)
     if not value:
         return False
-    if re.fullmatch(r"[\d\s.,:;!?()\-–—]+", value):
+    if re.fullmatch(r"page_\d+", value, flags=re.IGNORECASE):
         return False
-    if re.fullmatch(r"page_\d+", value):
+    if re.fullmatch(r"[\d\s.,:;!?()\-–—_#]+", value):
         return False
-    return bool(WORD_RE.search(value))
+    if re.fullmatch(r"#[0-9A-Fa-f]{3,8}", value):
+        return False
+    if re.fullmatch(r"[.#]?[A-Za-z_][A-Za-z0-9_-]*\s*[:=]\s*[-#\w.,%() ]+", value):
+        return False
+    return any(unicodedata.category(char).startswith("L") for char in value)
 
 
 def clone_without_namespace(element: ET.Element) -> ET.Element:
@@ -236,6 +294,7 @@ def opf_manifest_and_spine(paths: EpubPaths) -> tuple[dict[str, dict], list[str]
         manifest[item_id] = {
             "href": href,
             "media_type": item.get("media-type", ""),
+            "properties": item.get("properties", ""),
             "path": (paths.opf_dir / href).resolve(),
             "rel_path": (paths.opf_dir / href).relative_to(paths.root).as_posix(),
         }
@@ -248,20 +307,48 @@ def opf_manifest_and_spine(paths: EpubPaths) -> tuple[dict[str, dict], list[str]
 
 
 def toc_labels(paths: EpubPaths, manifest: dict[str, dict]) -> dict[str, str]:
-    ncx_items = [item for item in manifest.values() if item["media_type"] == "application/x-dtbncx+xml"]
-    if not ncx_items:
-        return {}
-    ncx_path = paths.root / ncx_items[0]["rel_path"]
-    tree = xml_parse(ncx_path)
     labels: dict[str, str] = {}
-    for nav_point in tree.findall(".//ncx:navPoint", NS):
-        text_el = nav_point.find("./ncx:navLabel/ncx:text", NS)
-        content_el = nav_point.find("./ncx:content", NS)
-        if text_el is None or content_el is None or not content_el.get("src"):
+    ncx_items = [item for item in manifest.values() if item["media_type"] == "application/x-dtbncx+xml"]
+    if ncx_items:
+        ncx_path = paths.root / ncx_items[0]["rel_path"]
+        tree = xml_parse(ncx_path)
+        for nav_point in tree.findall(".//ncx:navPoint", NS):
+            text_el = nav_point.find("./ncx:navLabel/ncx:text", NS)
+            content_el = nav_point.find("./ncx:content", NS)
+            if text_el is None or content_el is None or not content_el.get("src"):
+                continue
+            src = content_el.get("src", "").split("#", 1)[0]
+            rel = (paths.opf_dir / src).relative_to(paths.root).as_posix()
+            labels.setdefault(rel, normalize_space(text_el.text))
+
+    nav_items = [
+        item
+        for item in manifest.values()
+        if item["media_type"] == "application/xhtml+xml"
+        and ("nav" in str(item.get("properties", "")).split() or item["rel_path"].lower().endswith("nav.xhtml"))
+    ]
+    for item in nav_items:
+        nav_path = paths.root / item["rel_path"]
+        try:
+            nav_root = xml_parse(nav_path).getroot()
+        except ET.ParseError:
             continue
-        src = content_el.get("src", "").split("#", 1)[0]
-        rel = (paths.opf_dir / src).relative_to(paths.root).as_posix()
-        labels.setdefault(rel, normalize_space(text_el.text))
+        for nav in nav_root.iter():
+            if local_name(nav.tag) != "nav":
+                continue
+            nav_type = nav.attrib.get(f"{{{EPUB_NS}}}type") or nav.attrib.get("type") or ""
+            if nav_type and "toc" not in nav_type.split():
+                continue
+            for anchor in nav.iter():
+                if local_name(anchor.tag) != "a" or not anchor.attrib.get("href"):
+                    continue
+                src = anchor.attrib.get("href", "").split("#", 1)[0]
+                if not src:
+                    continue
+                rel = (nav_path.parent / src).resolve().relative_to(paths.root).as_posix()
+                label = element_text(anchor)
+                if label:
+                    labels.setdefault(rel, label)
     return labels
 
 
@@ -357,7 +444,78 @@ def extract_blocks(src_dir: Path, out_dir: Path) -> list[dict]:
     return blocks
 
 
-def write_batches(out_dir: Path, max_blocks: int) -> list[dict]:
+def estimate_block_chars(block: dict) -> int:
+    value = str(block.get("source_html") or block.get("source_text") or "")
+    return max(1, len(value))
+
+
+def estimate_tokens_from_chars(char_count: int) -> int:
+    return max(1, (char_count + ESTIMATED_CHARS_PER_TOKEN - 1) // ESTIMATED_CHARS_PER_TOKEN)
+
+
+def normalized_batch_limits(
+    max_blocks: int,
+    max_chars: int | str | None = None,
+    max_tokens: int | str | None = None,
+) -> tuple[int, int | None]:
+    try:
+        block_limit = int(max_blocks)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_blocks must be a positive integer") from exc
+    if block_limit <= 0:
+        raise ValueError("max_blocks must be a positive integer")
+
+    char_limits: list[int] = []
+    if max_chars not in (None, ""):
+        try:
+            char_limit = int(max_chars)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_chars must be a positive integer") from exc
+        if char_limit <= 0:
+            raise ValueError("max_chars must be a positive integer")
+        char_limits.append(char_limit)
+    if max_tokens not in (None, ""):
+        try:
+            token_limit = int(max_tokens)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_tokens must be a positive integer") from exc
+        if token_limit <= 0:
+            raise ValueError("max_tokens must be a positive integer")
+        char_limits.append(token_limit * ESTIMATED_CHARS_PER_TOKEN)
+    return block_limit, min(char_limits) if char_limits else None
+
+
+def iter_batch_chunks(
+    file_blocks: list[dict],
+    max_blocks: int,
+    max_chars: int | str | None = None,
+    max_tokens: int | str | None = None,
+) -> list[list[dict]]:
+    block_limit, char_limit = normalized_batch_limits(max_blocks, max_chars=max_chars, max_tokens=max_tokens)
+    chunks: list[list[dict]] = []
+    current: list[dict] = []
+    current_chars = 0
+    for block in file_blocks:
+        block_chars = estimate_block_chars(block)
+        would_exceed_blocks = len(current) >= block_limit
+        would_exceed_chars = char_limit is not None and current_chars + block_chars > char_limit
+        if current and (would_exceed_blocks or would_exceed_chars):
+            chunks.append(current)
+            current = []
+            current_chars = 0
+        current.append(block)
+        current_chars += block_chars
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def write_batches(
+    out_dir: Path,
+    max_blocks: int,
+    max_chars: int | str | None = None,
+    max_tokens: int | str | None = None,
+) -> list[dict]:
     blocks = read_jsonl(out_dir / "blocks.jsonl")
     by_file: dict[str, list[dict]] = defaultdict(list)
     for block in blocks:
@@ -369,15 +527,15 @@ def write_batches(out_dir: Path, max_blocks: int) -> list[dict]:
     batch_number = 0
     for file_name, file_blocks in sorted(by_file.items(), key=lambda item: (item[1][0]["order"], item[0])):
         chunk_index = 0
-        for start in range(0, len(file_blocks), max_blocks):
+        for chunk in iter_batch_chunks(file_blocks, max_blocks, max_chars=max_chars, max_tokens=max_tokens):
             chunk_index += 1
             batch_number += 1
-            chunk = file_blocks[start : start + max_blocks]
             safe_stem = Path(file_name).stem
             batch_name = f"batch_{batch_number:03d}_{safe_stem}_{chunk_index:02d}.jsonl"
             batch_path = batch_dir / batch_name
             write_jsonl(batch_path, chunk)
             translated_path = out_dir / "translated" / batch_name.replace(".jsonl", ".translated.jsonl")
+            source_chars = sum(estimate_block_chars(block) for block in chunk)
             batches.append(
                 {
                     "batch": batch_number,
@@ -387,6 +545,8 @@ def write_batches(out_dir: Path, max_blocks: int) -> list[dict]:
                     "start_seq": chunk[0]["seq"],
                     "end_seq": chunk[-1]["seq"],
                     "block_count": len(chunk),
+                    "source_chars": source_chars,
+                    "estimated_tokens": estimate_tokens_from_chars(source_chars),
                     "input": batch_path.relative_to(out_dir).as_posix(),
                     "output": translated_path.relative_to(out_dir).as_posix(),
                     "status": "pending",
@@ -415,9 +575,9 @@ def extract_name_candidates(out_dir: Path, min_count: int) -> list[dict]:
     return rows
 
 
-def default_glossary(target_language: str, out_dir: Path) -> str:
+def default_glossary(target_language: str, out_dir: Path, glossary_preset: str | None = None) -> str:
     extract_name_candidates(out_dir, min_count=3)
-    terms = build_glossary_terms(out_dir, target_language)
+    terms = build_glossary_terms(out_dir, target_language, glossary_preset=glossary_preset)
     return render_glossary_markdown(target_language, terms)
 
 
@@ -476,15 +636,28 @@ def command_prepare(args: argparse.Namespace) -> None:
         input_book,
         work_dir,
         converter_path=getattr(args, "converter_path", None),
+        conversion_timeout=getattr(args, "conversion_timeout", None),
     )
     write_input_format_metadata(pipeline_dir, input_metadata)
     with zipfile.ZipFile(work_dir / "input.epub") as archive:
-        archive.extractall(src_dir)
+        safe_extract(archive, src_dir)
 
     blocks = extract_blocks(src_dir, pipeline_dir)
-    batches = write_batches(pipeline_dir, args.max_blocks)
+    batches = write_batches(
+        pipeline_dir,
+        args.max_blocks,
+        max_chars=getattr(args, "max_chars", None),
+        max_tokens=getattr(args, "max_tokens", None),
+    )
     glossary_path = Path(args.glossary)
-    glossary_path.write_text(default_glossary(args.target_language, pipeline_dir), encoding="utf-8")
+    glossary_path.write_text(
+        default_glossary(
+            args.target_language,
+            pipeline_dir,
+            glossary_preset=getattr(args, "glossary_preset", None),
+        ),
+        encoding="utf-8",
+    )
     (pipeline_dir / "translation_context.md").write_text(
         "# Translation Context Ledger\n\n"
         "Maintain global continuity here: relationships, timeline, unresolved ambiguities, "
@@ -501,7 +674,7 @@ def command_prepare(args: argparse.Namespace) -> None:
 def structural_tokens(element: ET.Element) -> list[tuple[str, str, str]]:
     tokens: list[tuple[str, str, str]] = []
     for descendant in element.iter():
-        for attr in ("id", "href", "src"):
+        for attr in STRUCTURAL_ATTRS:
             value = descendant.attrib.get(attr)
             if value is not None:
                 tokens.append((local_name(descendant.tag), attr, value))
@@ -532,31 +705,66 @@ def attrs_compatible(source: ET.Element, translated: ET.Element) -> list[str]:
 
 def validate_translation_rows(batch_rows: list[dict], translated_rows: list[dict]) -> list[str]:
     issues: list[str] = []
-    by_id = {row.get("id"): row for row in translated_rows}
-    source_ids = {row["id"] for row in batch_rows}
+    if len(translated_rows) != len(batch_rows):
+        issues.append(
+            f"translated row count mismatch: expected {len(batch_rows)} got {len(translated_rows)}"
+        )
+
+    source_ids = [str(row.get("id", "")) for row in batch_rows]
+    translated_ids = [str(row.get("id", "")) for row in translated_rows]
+    source_counts = Counter(source_ids)
+    translated_counts = Counter(translated_ids)
+    for row_id, count in sorted(source_counts.items()):
+        if not row_id:
+            issues.append("source row missing id")
+        elif count > 1:
+            issues.append(f"duplicate source row id: {row_id}")
+    for row_id, count in sorted(translated_counts.items()):
+        if not row_id:
+            issues.append("translated row missing id")
+        elif count > 1:
+            issues.append(f"duplicate translated row id: {row_id}")
+
+    source_id_set = set(source_ids)
+    translated_id_set = set(translated_ids)
+    for missing in sorted(source_id_set - translated_id_set):
+        if missing:
+            issues.append(f"missing translated row for {missing}")
+    for extra in sorted(translated_id_set - source_id_set):
+        if extra:
+            issues.append(f"unexpected translated row id: {extra}")
+    if translated_ids != source_ids:
+        issues.append("translated row order changed: expected source batch order")
+
+    by_id: dict[str, dict] = {}
+    for row in translated_rows:
+        row_id = str(row.get("id", ""))
+        if row_id and translated_counts[row_id] == 1:
+            by_id[row_id] = row
+
     for source in batch_rows:
-        row = by_id.get(source["id"])
+        source_id = str(source.get("id", ""))
+        if not source_id:
+            continue
+        row = by_id.get(source_id)
         if row is None:
-            issues.append(f"missing translated row for {source['id']}")
             continue
         html = row.get("translated_html")
         if not isinstance(html, str) or not html.strip():
-            issues.append(f"missing translated_html for {source['id']}")
+            issues.append(f"missing translated_html for {source_id}")
             continue
         try:
-            source_el = parse_snippet(source["source_html"])
+            source_el = parse_snippet(str(source["source_html"]))
             translated_el = parse_snippet(html)
         except ValueError as exc:
-            issues.append(f"{source['id']}: {exc}")
+            issues.append(f"{source_id}: {exc}")
             continue
-        issues.extend(f"{source['id']}: {issue}" for issue in attrs_compatible(source_el, translated_el))
+        issues.extend(f"{source_id}: {issue}" for issue in attrs_compatible(source_el, translated_el))
         translated_text = element_text(translated_el)
         if PLACEHOLDER_RE.search(html) or PLACEHOLDER_RE.search(translated_text):
-            issues.append(f"{source['id']}: placeholder translation remains")
+            issues.append(f"{source_id}: placeholder translation remains")
         if WORD_RE.search(translated_text) and len(re.findall(r"[A-Za-z]{4,}", translated_text)) > 12:
-            issues.append(f"{source['id']}: possible long untranslated Latin text remains")
-    for extra in sorted(set(by_id) - source_ids):
-        issues.append(f"unexpected translated row id: {extra}")
+            issues.append(f"{source_id}: possible long untranslated Latin text remains")
     return issues
 
 
@@ -739,9 +947,26 @@ def command_apply(args: argparse.Namespace) -> None:
         output_book,
         output_format=output_format,
         converter_path=getattr(args, "converter_path", None),
+        conversion_timeout=getattr(args, "conversion_timeout", None),
     )
     write_output_format_metadata(pipeline_dir, metadata)
     print(f"wrote {output_book}")
+
+
+def is_external_reference(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped or stripped.startswith("#"):
+        return True
+    return bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", stripped))
+
+
+def srcset_candidates(value: str) -> list[str]:
+    candidates: list[str] = []
+    for part in value.split(","):
+        url = part.strip().split(" ", 1)[0]
+        if url:
+            candidates.append(url)
+    return candidates
 
 
 def href_target(base_file: str, href: str) -> str:
@@ -753,7 +978,7 @@ def href_target(base_file: str, href: str) -> str:
 
 def id_index(epub_dir: Path) -> dict[str, set[str]]:
     index: dict[str, set[str]] = defaultdict(set)
-    for path in epub_dir.rglob("*.xhtml"):
+    for path in (p for p in epub_dir.rglob("*") if p.suffix.lower() in HTML_DOCUMENT_EXTS):
         rel = path.relative_to(epub_dir).as_posix()
         try:
             root = xml_parse(path).getroot()
@@ -780,6 +1005,7 @@ def audit_epub_dir(epub_dir: Path, source_epub: Path | None = None) -> dict:
     ids = id_index(epub_dir)
     missing_page_anchors: list[str] = []
     broken_internal_links: list[str] = []
+    broken_resource_links: list[str] = []
     external_links = 0
     ncx_navpoints = 0
     ncx_page_targets = 0
@@ -801,7 +1027,7 @@ def audit_epub_dir(epub_dir: Path, source_epub: Path | None = None) -> dict:
             if anchor not in ids.get(rel, set()):
                 missing_page_anchors.append(src)
 
-    for path in epub_dir.rglob("*.xhtml"):
+    for path in (p for p in epub_dir.rglob("*") if p.suffix.lower() in HTML_DOCUMENT_EXTS):
         rel = path.relative_to(epub_dir).as_posix()
         try:
             root = xml_parse(path).getroot()
@@ -809,22 +1035,32 @@ def audit_epub_dir(epub_dir: Path, source_epub: Path | None = None) -> dict:
             broken_internal_links.append(f"{rel}: XML parse error: {exc}")
             continue
         for element in root.iter():
+            tag = local_name(element.tag)
             href = element.attrib.get("href")
-            if not href:
-                continue
-            if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", href):
-                external_links += 1
-                continue
-            target_rel = href_target(rel, href)
-            if not target_rel:
-                continue
-            if not (epub_dir / target_rel).exists():
-                broken_internal_links.append(f"{rel}: missing href {href}")
-                continue
-            if "#" in href:
-                anchor = href.split("#", 1)[1]
-                if anchor and anchor not in ids.get(target_rel, set()):
-                    broken_internal_links.append(f"{rel}: missing anchor {href}")
+            if href:
+                if is_external_reference(href):
+                    external_links += 1
+                else:
+                    target_rel = href_target(rel, href)
+                    if target_rel:
+                        target_path = epub_dir / target_rel
+                        if not target_path.exists():
+                            broken_internal_links.append(f"{rel}: missing href {href}")
+                        elif "#" in href:
+                            anchor = href.split("#", 1)[1]
+                            if anchor and anchor not in ids.get(target_rel, set()):
+                                broken_internal_links.append(f"{rel}: missing anchor {href}")
+            for attr in RESOURCE_ATTRS_BY_TAG.get(tag, ()):  # local media/resource references
+                raw_value = element.attrib.get(attr)
+                if not raw_value:
+                    continue
+                values = srcset_candidates(raw_value) if attr == "srcset" else [raw_value]
+                for value in values:
+                    if is_external_reference(value):
+                        continue
+                    target_rel = href_target(rel, value)
+                    if target_rel and not (epub_dir / target_rel).exists():
+                        broken_resource_links.append(f"{rel}: missing resource {value}")
 
     images = [
         path.relative_to(epub_dir).as_posix()
@@ -851,6 +1087,7 @@ def audit_epub_dir(epub_dir: Path, source_epub: Path | None = None) -> dict:
         "ncx_page_targets": ncx_page_targets,
         "missing_page_anchors": sorted(set(missing_page_anchors)),
         "broken_internal_links": broken_internal_links,
+        "broken_resource_links": sorted(set(broken_resource_links)),
         "external_links": external_links,
         "image_count": len(images),
         "images": images,
@@ -870,7 +1107,7 @@ def command_audit(args: argparse.Namespace) -> None:
             raise ValueError(f"zip integrity failed at {bad}")
         with tempfile.TemporaryDirectory(prefix="babel_epub_audit_") as tmp:
             tmp_dir = Path(tmp)
-            archive.extractall(tmp_dir)
+            safe_extract(archive, tmp_dir)
             report = audit_epub_dir(tmp_dir, source_epub=epub_path)
     report["zip_integrity"] = "passed"
     out_path = Path(args.out)
@@ -880,6 +1117,7 @@ def command_audit(args: argparse.Namespace) -> None:
         len(report["missing_manifest_items"])
         + len(report["missing_page_anchors"])
         + len(report["broken_internal_links"])
+        + len(report.get("broken_resource_links", []))
     )
     print(f"wrote {out_path}; structural issue count: {issue_count}")
     if issue_count:
@@ -941,6 +1179,56 @@ def command_worker_instructions(args: argparse.Namespace) -> None:
     print(worker_instructions(args.target_language))
 
 
+
+
+def command_import_glossary(args: argparse.Namespace) -> None:
+    work_dir = Path(args.work_dir)
+    imported = import_glossary_file(Path(args.file), default_status=args.default_status, fmt=args.format)
+    existing = read_glossary_terms(work_dir)
+    merged = merge_glossary_terms(existing, imported, mode=args.mode)
+    normalized = write_glossary_terms(work_dir, merged)
+    glossary_path = Path(args.glossary)
+    glossary_path.write_text(render_glossary_markdown(args.target_language, normalized), encoding="utf-8")
+    print(
+        f"imported {len(imported)} glossary terms into {work_dir / 'pipeline' / 'glossary_terms.json'} "
+        f"({len(normalized)} total)"
+    )
+
+
+def command_export_glossary(args: argparse.Namespace) -> None:
+    work_dir = Path(args.work_dir)
+    terms = read_glossary_terms(work_dir)
+    out_path = export_glossary_file(Path(args.file), terms, target_language=args.target_language, fmt=args.format)
+    print(f"exported {len(terms)} glossary terms to {out_path}")
+
+def command_memory(args: argparse.Namespace) -> None:
+    from .memory import TranslationMemoryStore, memory_path_for, normalize_memory_project_id
+
+    project_id = normalize_memory_project_id(getattr(args, "project_id", "default"))
+    data_dir = Path(getattr(args, "data_dir", None) or os.environ.get("BABEL_DATA_DIR", "./babel-data"))
+    store = TranslationMemoryStore(
+        memory_path_for(data_dir, project_id=project_id, memory_path=getattr(args, "memory_path", None)),
+        project_id=project_id,
+    )
+    action = args.action
+    if action == "stats":
+        print(json.dumps(store.stats(), ensure_ascii=False, indent=2))
+        return
+    if action == "export":
+        if not args.file:
+            raise ValueError("memory export requires --file")
+        out_path = store.export_to(Path(args.file))
+        print(f"exported translation memory to {out_path}")
+        return
+    if action == "import":
+        if not args.file:
+            raise ValueError("memory import requires --file")
+        result = store.import_from(Path(args.file))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    raise ValueError(f"unsupported memory action: {action}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Babel layout-preserving ebook translation pipeline")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -952,7 +1240,11 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--glossary", default="translation_glossary.md")
     prepare.add_argument("--target-language", default="Simplified Chinese")
     prepare.add_argument("--converter-path", help="Optional path to Calibre ebook-convert for MOBI/AZW/PDF/etc.")
+    prepare.add_argument("--conversion-timeout", type=float, help="Calibre ebook-convert timeout in seconds. Defaults to BABEL_CONVERSION_TIMEOUT or 600.")
     prepare.add_argument("--max-blocks", type=int, default=120)
+    prepare.add_argument("--max-chars", type=int, help="Optional approximate source character budget per batch.")
+    prepare.add_argument("--max-tokens", type=int, help="Optional estimated token budget per batch; uses a conservative character estimate.")
+    prepare.add_argument("--glossary-preset", default="", help="Optional built-in preset name or JSON preset path.")
     prepare.add_argument("--force", action="store_true")
     prepare.set_defaults(func=command_prepare)
 
@@ -976,6 +1268,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format: epub, mobi, azw3, pdf, docx, txt, html, htmlz, kepub, rtf, fb2.",
     )
     apply.add_argument("--converter-path", help="Optional path to Calibre ebook-convert for non-EPUB output.")
+    apply.add_argument("--conversion-timeout", type=float, help="Calibre ebook-convert timeout in seconds. Defaults to BABEL_CONVERSION_TIMEOUT or 600.")
     apply.add_argument("--title")
     apply.add_argument("--language", default="zh-CN")
     apply.set_defaults(func=command_apply)
@@ -993,8 +1286,29 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--report", default="translation_report.md")
     report.set_defaults(func=command_report)
 
-    worker = subparsers.add_parser("worker-instructions", help="Print Codex/subagent batch instructions.")
-    worker.add_argument("--target-language", default="Simplified Chinese")
-    worker.set_defaults(func=command_worker_instructions)
+    import_glossary = subparsers.add_parser("import-glossary", help="Import glossary terms from CSV, TBX, Markdown, or JSON.")
+    import_glossary.add_argument("--work-dir", default="babel_work")
+    import_glossary.add_argument("--file", required=True)
+    import_glossary.add_argument("--format", choices=["csv", "tbx", "md", "json"], help="Input format. Defaults to file extension.")
+    import_glossary.add_argument("--mode", choices=["upsert", "replace", "append"], default="upsert")
+    import_glossary.add_argument("--default-status", choices=["pending", "approved", "ignored"], default="pending")
+    import_glossary.add_argument("--target-language", default="Simplified Chinese")
+    import_glossary.add_argument("--glossary", default="translation_glossary.md")
+    import_glossary.set_defaults(func=command_import_glossary)
+
+    export_glossary = subparsers.add_parser("export-glossary", help="Export structured glossary terms to CSV, TBX, Markdown, or JSON.")
+    export_glossary.add_argument("--work-dir", default="babel_work")
+    export_glossary.add_argument("--file", required=True)
+    export_glossary.add_argument("--format", choices=["csv", "tbx", "md", "json"], help="Output format. Defaults to file extension.")
+    export_glossary.add_argument("--target-language", default="Simplified Chinese")
+    export_glossary.set_defaults(func=command_export_glossary)
+
+    memory = subparsers.add_parser("memory", help="Manage Translation Memory import/export/statistics.")
+    memory.add_argument("action", choices=["stats", "export", "import"])
+    memory.add_argument("--project-id", default="default", help="Project or series id for the memory store.")
+    memory.add_argument("--data-dir", default=os.environ.get("BABEL_DATA_DIR", "./babel-data"))
+    memory.add_argument("--memory-path", help="Explicit memory JSON path. Overrides --data-dir/--project-id.")
+    memory.add_argument("--file", help="Import source or export destination JSON/JSONL file.")
+    memory.set_defaults(func=command_memory)
 
     return parser

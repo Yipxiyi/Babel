@@ -28,7 +28,7 @@ Most quick ebook translation scripts flatten a book into text and destroy the re
 
 - Preserves chapter files, spine order, CSS, images, links, anchors, IDs, and inline emphasis.
 - Extracts only human-readable XHTML blocks into JSONL batches.
-- Generates a glossary scaffold, drafts missing term translations when a Web provider is configured, and creates worker instructions before translation begins.
+- Generates a glossary scaffold, optionally seeds known-name decisions from a glossary preset, drafts missing term translations when a Web provider is configured, and creates worker instructions before translation begins.
 - Validates each translated batch before it can be applied.
 - Runs Web translations with configurable batch concurrency, timeout, retries, and failed-job resume.
 - Rejects common fake/placeholder translations such as `第 N 段译文`.
@@ -75,11 +75,11 @@ Open:
 http://127.0.0.1:7860
 ```
 
-The Web UI lets you upload an ebook, choose the final output format, auto-draft missing glossary translations with a configured provider, review/edit the glossary in a modal, choose concurrency/timeout/retry settings, watch terminal-style progress, resume failed jobs, and download the translated book plus report.
+The Web UI lets you upload an ebook, choose the final output format, auto-draft missing glossary translations with a configured provider, import/export glossary terms from the review modal, choose concurrency/timeout/retry settings, watch terminal-style progress, resume failed jobs, and download the translated book plus report.
 
 The top-right `Guide` button opens the recommended operation flow. The language toggle supports English and Simplified Chinese and is saved in `localStorage`.
 
-Docker includes Calibre for MOBI/AZW3/PDF/DOCX/CBZ input conversion and non-EPUB output export. Private job data is stored in the `babel-data` volume. Do not expose this server publicly without adding authentication.
+Docker includes Calibre for MOBI/AZW3/PDF/DOCX/CBZ input conversion and non-EPUB output export. Private job data is stored in the `babel-data` volume. Do not expose this server publicly without setting `BABEL_WEB_TOKEN` behind HTTPS or another trusted authentication layer. Web uploads are limited to 200 MB by default; set `BABEL_MAX_UPLOAD_MB` to raise or lower the limit.
 
 ## Install From Source
 
@@ -105,6 +105,7 @@ Build the React UI into the Python package static directory:
 
 ```bash
 npm install --prefix web
+npm test --prefix web
 npm run build --prefix web
 ```
 
@@ -128,15 +129,32 @@ Vite runs on `http://127.0.0.1:5173` and proxies `/api` to the local Babel serve
 Supported MVP providers:
 
 - `OpenAI Compatible`: any `/v1/chat/completions`-compatible endpoint.
+- `OpenAI Responses`: OpenAI `/v1/responses` with optional JSON Schema output.
 - `Anthropic Claude`: Anthropic Messages API.
+- `Ollama`: local OpenAI-compatible models at `http://127.0.0.1:11434/v1` by default.
+- `DeepL` and `Google Translate`: HTML-aware machine translation adapters for users who prefer dedicated MT providers.
 - `Fake Dry Run`: deterministic local output for testing the pipeline without spending tokens.
+
+OpenAI-compatible providers can optionally request JSON Schema responses with the Web settings `Structured JSON output` toggle or the MCP `structured_output_enabled` field. Anthropic remains prompt-constrained, and Babel still falls back to its tolerant parser for returned text.
+
+Translation Memory can be enabled from Web settings or MCP with `memory_enabled` plus a stable `memory_project_id`. Babel stores exact source-snippet matches under `BABEL_DATA_DIR/translation_memory/<project>.json`, validates every hit against the current source row, skips provider calls for valid hits, and writes successful translated rows back to the project memory.
+
+The quality report combines locked-glossary repair with deterministic QA fields for untranslated ratio, long untranslated source-language segments, punctuation/quote drift, person-name drift, and chapter-level issue grouping. The Web validation panel shows the summary and the full JSON is downloadable as `AI QA JSON`.
 
 Runtime controls:
 
 - `Concurrency`: default `3`, clamped to `1..8`.
 - `Request timeout`: default `300` seconds.
 - `Retries`: default `1`; retryable failures are timeout, HTTP 429, and HTTP 5xx. HTTP 400/401 are not retried.
-- Failed batches continue to be recorded while other batches keep running. After all workers finish, use `Resume Translation` to rerun only missing, damaged, or invalid batch outputs.
+- `Requests / min` and `Tokens / min`: optional provider rate limits shared by the job.
+- `Budget limit` plus input/output cost per 1M tokens: optional spend guard. Babel estimates each request before it is sent, stops before crossing the budget, and failed jobs can be resumed after raising the limit.
+- Failed batches continue to be recorded while other batches keep running. After all workers finish, use `Resume Translation` to rerun only missing, damaged, invalid, or budget-stopped batch outputs.
+
+Security and upload controls:
+
+- `BABEL_WEB_TOKEN`: optional bearer token for all `/api/*` routes, including downloads. Send `Authorization: Bearer <token>` or `X-Babel-Token: <token>`. The token is never returned by `/api/meta` or provider settings responses.
+- `BABEL_MAX_UPLOAD_MB`: maximum upload size in megabytes. Default: `200`. Oversized uploads return HTTP 413 before multipart parsing.
+- `BABEL_CONVERSION_TIMEOUT`: Calibre `ebook-convert` timeout in seconds for conversion-backed input or output. Default: `600`.
 
 ## CLI Quick Start
 
@@ -149,6 +167,25 @@ babel-epub prepare \
   --glossary ./translation_glossary.md \
   --target-language "Simplified Chinese" \
   --max-blocks 120
+```
+
+Use `--glossary-preset edge-chronicles` to seed the glossary from the bundled Edge Chronicles preset, or pass a path to a compatible JSON preset. Without a preset, Babel keeps extraction generic and leaves project-specific terms for review.
+
+Use `--max-chars` or `--max-tokens` with `prepare` to split batches by approximate source size in addition to the legacy `--max-blocks` cap. This helps keep provider prompts below context limits for books with very long paragraphs.
+
+Manage Translation Memory stores from the CLI when you need import/export outside the Web UI:
+
+```bash
+babel-epub memory stats --project-id my-series --data-dir ./babel-data
+babel-epub memory export --project-id my-series --data-dir ./babel-data --file ./my-series-memory.json
+babel-epub memory import --project-id my-series --data-dir ./babel-data --file ./my-series-memory.json
+```
+
+Import or export structured glossary terms as CSV, TBX, Markdown preset, or JSON. Imports preserve `approved`/`pending`/`ignored` status and `locked` decisions, then regenerate the compact Markdown prompt surface used by workers:
+
+```bash
+babel-epub import-glossary --work-dir ./babel_work/book --file ./glossary.csv --mode upsert
+babel-epub export-glossary --work-dir ./babel_work/book --file ./glossary.tbx
 ```
 
 Babel creates:
@@ -174,7 +211,7 @@ For non-EPUB input:
 babel-epub prepare --input-book ./input.azw3 --work-dir ./babel_work/book
 ```
 
-TXT/HTML work without external tools. MOBI/AZW/PDF/DOCX/CBZ and similar formats require Calibre `ebook-convert` unless you use the Docker image.
+TXT/HTML work without external tools. MOBI/AZW/PDF/DOCX/CBZ and similar formats require Calibre `ebook-convert` unless you use the Docker image. Use `--conversion-timeout` or `BABEL_CONVERSION_TIMEOUT` to bound long conversions.
 
 Translate each batch by writing matching JSONL rows into `pipeline/translated/`.
 
@@ -290,7 +327,7 @@ Install Babel, then add this MCP server to Claude Desktop:
 
 See [integrations/claude](integrations/claude).
 
-The `start_translation` MCP tool accepts optional `resume`, `max_concurrency`, `request_timeout`, and `max_retries` fields. Defaults match the Web UI.
+The `start_translation` MCP tool accepts optional `resume`, `batch_filter`, `max_concurrency`, `request_timeout`, `max_retries`, `structured_output_enabled`, `memory_enabled`, `memory_project_id`, `memory_path`, `ai_qa_enabled`, `auto_title_enabled`, provider rate limits, and budget/cost fields. MCP also exposes `list_jobs`, `artifact_path`, `read_glossary_terms`, `update_glossary_terms`, `import_glossary`, `export_glossary`, `resume_failed_job`, and `retry_batch`; `retry_batch` clears the selected translated JSONL and resumes with a one-batch filter.
 
 ## Plugin Or Skill?
 
@@ -323,6 +360,8 @@ source .venv/bin/activate
 python3 -m pip install -e .
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 -m py_compile src/babel_epub/*.py
+npm test --prefix web
+npm run build --prefix web
 docker compose config  # optional, requires Docker
 ```
 

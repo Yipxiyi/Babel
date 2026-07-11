@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 import tempfile
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
+from babel_epub import __version__
 from babel_epub.jobs import BabelJobEngine, JobRequest
 from babel_epub.providers import TranslationProvider
 from babel_epub.web import (
     BabelWebHandler,
+    FormPart,
+    _field_int,
+    _max_upload_bytes,
     _merge_provider_settings,
     _package_version,
     _parse_multipart_form,
@@ -125,6 +131,8 @@ class WebTests(unittest.TestCase):
         self.assertIn("active_batches", app_source)
         self.assertIn("failed_batches", app_source)
         self.assertIn("Output format", app_source)
+        self.assertIn("Batch character limit", app_source)
+        self.assertIn("max_chars", app_source)
         self.assertIn("Download Book", app_source)
         self.assertIn("AZW3", app_source)
         self.assertIn("HTMLZ", app_source)
@@ -160,6 +168,8 @@ class WebTests(unittest.TestCase):
         self.assertIn("Rows per page", app_source)
         self.assertIn("Previous", app_source)
         self.assertIn("Next", app_source)
+        self.assertIn("Structured JSON output", app_source)
+        self.assertIn("structured_output_enabled", app_source)
         self.assertIn("AI QA repair loop", app_source)
         self.assertIn("Auto-generate output title", app_source)
         self.assertIn("onDrop", app_source)
@@ -172,6 +182,55 @@ class WebTests(unittest.TestCase):
         self.assertTrue(assets)
         self.assertEqual(_resolve_static_path(f"/assets/{assets[0].name}"), assets[0])
         self.assertIsNone(_resolve_static_path("/../pyproject.toml"))
+
+
+    def test_create_job_rejects_missing_content_length_oversize_and_bad_multipart(self) -> None:
+        handler = object.__new__(BabelWebHandler)
+        captured = []
+        handler.send_error = lambda status, message=None: captured.append((status, message))
+        handler.headers = {}
+        handler.rfile = BytesIO(b"")
+
+        handler._create_job()
+        self.assertEqual(captured[-1][0], 411)
+
+        with patch.dict(os.environ, {"BABEL_MAX_UPLOAD_MB": "1"}):
+            self.assertEqual(_max_upload_bytes(), 1024 * 1024)
+            handler.headers = {"Content-Length": str(1024 * 1024 + 1), "Content-Type": "multipart/form-data; boundary=abc"}
+            handler.rfile = BytesIO(b"")
+            handler._create_job()
+        self.assertEqual(captured[-1][0], 413)
+
+        handler.headers = {"Content-Length": "7", "Content-Type": "multipart/form-data; boundary=abc"}
+        handler.rfile = BytesIO(b"notbody")
+        handler._create_job()
+        self.assertEqual(captured[-1][0], 400)
+        self.assertIn("boundary", captured[-1][1])
+
+    def test_api_token_auth_blocks_api_and_download_paths_when_configured(self) -> None:
+        handler = object.__new__(BabelWebHandler)
+        captured = []
+        handler.send_error = lambda status, message=None: captured.append((status, message))
+        handler._send_json = lambda data, status=200: captured.append((status, data))
+        handler.headers = {}
+        handler.path = "/api/jobs/job-1/download/output"
+        with patch.dict(os.environ, {"BABEL_WEB_TOKEN": "secret"}):
+            self.assertFalse(handler._is_authorized_api_request())
+            handler.do_GET()
+            self.assertEqual(captured[-1][0], 401)
+            handler.headers = {"Authorization": "Bearer secret"}
+            self.assertTrue(handler._is_authorized_api_request())
+            handler.headers = {"X-Babel-Token": "secret"}
+            self.assertTrue(handler._is_authorized_api_request())
+
+
+    def test_dynamic_batch_form_field_requires_positive_integer(self) -> None:
+        self.assertEqual(_field_int({"max_chars": FormPart("max_chars", value="1200")}, "max_chars"), 1200)
+        self.assertIsNone(_field_int({}, "max_chars"))
+        with self.assertRaisesRegex(ValueError, "max_chars must be a positive integer"):
+            _field_int({"max_chars": FormPart("max_chars", value="0")}, "max_chars")
+        with self.assertRaisesRegex(ValueError, "max_chars must be a positive integer"):
+            _field_int({"max_chars": FormPart("max_chars", value="abc")}, "max_chars")
 
     def test_multipart_parser_preserves_binary_file_content(self) -> None:
         body = (
@@ -203,8 +262,16 @@ class WebTests(unittest.TestCase):
                     "max_concurrency": 3,
                     "request_timeout": 300,
                     "max_retries": 1,
+                    "structured_output_enabled": True,
+                    "memory_enabled": True,
+                    "memory_project_id": "series-a",
                     "ai_qa_enabled": True,
                     "auto_title_enabled": True,
+                    "max_requests_per_minute": 12,
+                    "max_tokens_per_minute": 24000,
+                    "budget_limit": 1.25,
+                    "input_cost_per_1m_tokens": 2.5,
+                    "output_cost_per_1m_tokens": 7.5,
                 },
             )
 
@@ -216,6 +283,14 @@ class WebTests(unittest.TestCase):
                     "base_url": "https://api.openai.com/v1",
                     "model": "gpt-4.1",
                     "api_key": "",
+                    "structured_output_enabled": "",
+                    "memory_enabled": "",
+                    "memory_project_id": "",
+                    "max_requests_per_minute": "",
+                    "max_tokens_per_minute": "",
+                    "budget_limit": "",
+                    "input_cost_per_1m_tokens": "",
+                    "output_cost_per_1m_tokens": "",
                 },
                 stored,
             )
@@ -224,11 +299,67 @@ class WebTests(unittest.TestCase):
             self.assertTrue(public["has_api_key"])
             self.assertNotIn("api_key", public)
             self.assertEqual(merged["api_key"], "sk-secret")
+            self.assertTrue(stored["structured_output_enabled"])
+            self.assertTrue(public["structured_output_enabled"])
+            self.assertTrue(merged["structured_output_enabled"])
+            self.assertTrue(stored["memory_enabled"])
+            self.assertTrue(public["memory_enabled"])
+            self.assertTrue(merged["memory_enabled"])
+            self.assertEqual(public["memory_project_id"], "series-a")
+            self.assertEqual(merged["memory_project_id"], "series-a")
             self.assertTrue(public["ai_qa_enabled"])
             self.assertTrue(public["auto_title_enabled"])
+            self.assertEqual(public["max_requests_per_minute"], 12)
+            self.assertEqual(public["max_tokens_per_minute"], 24000)
+            self.assertEqual(public["budget_limit"], 1.25)
+            self.assertEqual(public["input_cost_per_1m_tokens"], 2.5)
+            self.assertEqual(public["output_cost_per_1m_tokens"], 7.5)
+            self.assertEqual(merged["max_requests_per_minute"], 12)
+            self.assertEqual(merged["budget_limit"], 1.25)
+
+    def test_glossary_import_and_export_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: FakeProvider())
+            job = engine.create_job(
+                JobRequest(filename="input.epub", content=input_epub.read_bytes(), target_language="Simplified Chinese")
+            )
+            captured = {}
+            handler = object.__new__(BabelWebHandler)
+            handler.engine = engine
+            body = json.dumps(
+                {
+                    "format": "csv",
+                    "content": "source,translation,type,status,confidence,locked\nRook,鲁克,person,approved,0.95,true\n",
+                }
+            ).encode("utf-8")
+            handler.rfile = BytesIO(body)
+            handler.headers = {"Content-Length": str(len(body))}
+            handler._send_json = lambda data, status=200: captured.update(data=data, status=status)
+
+            handler._import_glossary_terms(job.job_id)
+            response = captured["data"]
+            self.assertEqual(response["summary"]["imported"], 1)
+            self.assertEqual(response["glossary_terms"][0]["translation"], "鲁克")
+
+            export_handler = object.__new__(BabelWebHandler)
+            export_handler.engine = engine
+            export_handler.path = f"/api/jobs/{job.job_id}/glossary-terms/export?format=csv"
+            export_handler.headers_sent = {}
+            export_handler.wfile = BytesIO()
+            export_handler.send_response = lambda status: None
+            export_handler.send_header = lambda key, value: export_handler.headers_sent.update({key: value})
+            export_handler.end_headers = lambda: None
+            export_handler._export_glossary_terms(job.job_id)
+            exported = export_handler.wfile.getvalue().decode("utf-8")
+            self.assertEqual(export_handler.headers_sent["Content-Type"], "text/csv; charset=utf-8")
+            self.assertIn("source,translation", exported)
+            self.assertIn("Rook", exported)
 
     def test_meta_version_uses_package_version(self) -> None:
-        self.assertEqual(_package_version(), "0.7.0")
+        self.assertEqual(_package_version(), __version__)
 
 
 if __name__ == "__main__":

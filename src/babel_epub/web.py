@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import mimetypes
 import os
@@ -11,7 +12,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from . import __version__
 from .formats import supported_input_extensions, supported_output_extensions
@@ -21,14 +22,18 @@ from .providers import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_REQUEST_TIMEOUT,
     ProviderSettings,
+    normalize_budget_limit,
+    normalize_cost_per_1m,
     normalize_max_concurrency,
     normalize_max_retries,
+    normalize_rate_limit,
     normalize_request_timeout,
 )
 
 
 STATIC_DIR = Path(__file__).with_name("static")
 PROVIDER_SETTINGS_FILE = "provider_settings.json"
+DEFAULT_MAX_UPLOAD_MB = 200
 FALLBACK_INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -68,6 +73,9 @@ class BabelWebHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        if path.startswith("/api/") and not self._is_authorized_api_request():
+            self.send_error(HTTPStatus.UNAUTHORIZED, "missing or invalid API token")
+            return
         if path == "/api/meta":
             self._send_json(
                 {
@@ -88,6 +96,9 @@ class BabelWebHandler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "glossary-terms":
             self._send_glossary_terms(parts[2])
             return
+        if len(parts) == 5 and parts[:2] == ["api", "jobs"] and parts[3:] == ["glossary-terms", "export"]:
+            self._export_glossary_terms(parts[2])
+            return
         if len(parts) == 3 and parts[:2] == ["api", "jobs"]:
             self._send_job(parts[2])
             return
@@ -106,6 +117,9 @@ class BabelWebHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         path = urlparse(self.path).path
+        if path.startswith("/api/") and not self._is_authorized_api_request():
+            self.send_error(HTTPStatus.UNAUTHORIZED, "missing or invalid API token")
+            return
         parts = [unquote(part) for part in path.strip("/").split("/")]
         if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "glossary-terms":
             self._update_glossary_terms(parts[2])
@@ -114,6 +128,9 @@ class BabelWebHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path.startswith("/api/") and not self._is_authorized_api_request():
+            self.send_error(HTTPStatus.UNAUTHORIZED, "missing or invalid API token")
+            return
         if path == "/api/jobs":
             self._create_job()
             return
@@ -123,6 +140,9 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 5 and parts[:2] == ["api", "jobs"] and parts[3:] == ["glossary-terms", "autofill"]:
             self._autofill_glossary_terms(parts[2])
+            return
+        if len(parts) == 5 and parts[:2] == ["api", "jobs"] and parts[3:] == ["glossary-terms", "import"]:
+            self._import_glossary_terms(parts[2])
             return
         if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "start":
             self._start_job(parts[2])
@@ -135,6 +155,16 @@ class BabelWebHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:
         if os.environ.get("BABEL_WEB_LOGS"):
             super().log_message(format, *args)
+
+    def _is_authorized_api_request(self) -> bool:
+        token = os.environ.get("BABEL_WEB_TOKEN", "").strip()
+        if not token:
+            return True
+        bearer = self.headers.get("Authorization", "")
+        if bearer.startswith("Bearer ") and hmac.compare_digest(bearer[7:].strip(), token):
+            return True
+        header_token = self.headers.get("X-Babel-Token", "")
+        return bool(header_token) and hmac.compare_digest(header_token.strip(), token)
 
     def _send_static(self, request_path: str) -> bool:
         static_path = _resolve_static_path(request_path)
@@ -149,10 +179,25 @@ class BabelWebHandler(BaseHTTPRequestHandler):
         return True
 
     def _create_job(self) -> None:
+        content_length = self.headers.get("Content-Length")
+        if not content_length:
+            self.send_error(HTTPStatus.LENGTH_REQUIRED, "Content-Length is required")
+            return
+        try:
+            length = int(content_length)
+        except ValueError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "invalid Content-Length")
+            return
+        if length < 0:
+            self.send_error(HTTPStatus.BAD_REQUEST, "invalid Content-Length")
+            return
+        if length > _max_upload_bytes():
+            self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "upload exceeds configured limit")
+            return
         try:
             form = _parse_multipart_form(
                 content_type=self.headers.get("Content-Type", ""),
-                body=self.rfile.read(int(self.headers.get("Content-Length", "0"))),
+                body=self.rfile.read(length),
             )
         except ValueError as exc:
             self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
@@ -171,6 +216,9 @@ class BabelWebHandler(BaseHTTPRequestHandler):
                     title=_field_value(form, "title", ""),
                     language=_field_value(form, "language", "zh-CN"),
                     output_format=_field_value(form, "output_format", "epub"),
+                    max_chars=_field_int(form, "max_chars"),
+                    max_tokens=_field_int(form, "max_tokens"),
+                    glossary_preset=_field_value(form, "glossary_preset", ""),
                 )
             )
         except ValueError as exc:
@@ -212,6 +260,45 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"job": job.to_dict(include_paths=False), "glossary_terms": updated})
 
+    def _import_glossary_terms(self, job_id: str) -> None:
+        try:
+            data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8"))
+            content = str(data.get("content", ""))
+            fmt = str(data.get("format", "csv"))
+            default_status = str(data.get("default_status", "pending"))
+            mode = str(data.get("mode", "upsert"))
+            if not content.strip():
+                raise ValueError("content is required")
+            job, updated, summary = self.engine.import_glossary_terms(
+                job_id, content, fmt=fmt, default_status=default_status, mode=mode
+            )
+        except KeyError:
+            self.send_error(HTTPStatus.NOT_FOUND, "job not found")
+            return
+        except (ValueError, json.JSONDecodeError) as exc:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        self._send_json({"job": job.to_dict(include_paths=False), "glossary_terms": updated, "summary": summary})
+
+    def _export_glossary_terms(self, job_id: str) -> None:
+        try:
+            query = parse_qs(urlparse(self.path).query)
+            fmt = (query.get("format") or ["csv"])[0]
+            content = self.engine.export_glossary_terms(job_id, fmt=fmt)
+        except KeyError:
+            self.send_error(HTTPStatus.NOT_FOUND, "job not found")
+            return
+        except ValueError as exc:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        filename = f"glossary.{_glossary_export_extension(fmt)}"
+        content_type = _content_type_for_glossary_export(fmt)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(content.encode("utf-8"))
+
     def _update_glossary(self, job_id: str) -> None:
         try:
             content = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8")
@@ -249,6 +336,14 @@ class BabelWebHandler(BaseHTTPRequestHandler):
                     max_concurrency=normalize_max_concurrency(
                         merged_data.get("max_concurrency", DEFAULT_MAX_CONCURRENCY)
                     ),
+                    structured_output_enabled=bool(merged_data.get("structured_output_enabled", False)),
+                    memory_enabled=bool(merged_data.get("memory_enabled", False)),
+                    memory_project_id=str(merged_data.get("memory_project_id", "")),
+                    max_requests_per_minute=normalize_rate_limit(merged_data.get("max_requests_per_minute", 0)),
+                    max_tokens_per_minute=normalize_rate_limit(merged_data.get("max_tokens_per_minute", 0)),
+                    budget_limit=normalize_budget_limit(merged_data.get("budget_limit", 0)),
+                    input_cost_per_1m_tokens=normalize_cost_per_1m(merged_data.get("input_cost_per_1m_tokens", 0)),
+                    output_cost_per_1m_tokens=normalize_cost_per_1m(merged_data.get("output_cost_per_1m_tokens", 0)),
                 ),
             )
             updated = self.engine.read_glossary_terms(job_id)
@@ -288,6 +383,14 @@ class BabelWebHandler(BaseHTTPRequestHandler):
                     max_concurrency=normalize_max_concurrency(
                         merged_data.get("max_concurrency", DEFAULT_MAX_CONCURRENCY)
                     ),
+                    structured_output_enabled=bool(merged_data.get("structured_output_enabled", False)),
+                    memory_enabled=bool(merged_data.get("memory_enabled", False)),
+                    memory_project_id=str(merged_data.get("memory_project_id", "")),
+                    max_requests_per_minute=normalize_rate_limit(merged_data.get("max_requests_per_minute", 0)),
+                    max_tokens_per_minute=normalize_rate_limit(merged_data.get("max_tokens_per_minute", 0)),
+                    budget_limit=normalize_budget_limit(merged_data.get("budget_limit", 0)),
+                    input_cost_per_1m_tokens=normalize_cost_per_1m(merged_data.get("input_cost_per_1m_tokens", 0)),
+                    output_cost_per_1m_tokens=normalize_cost_per_1m(merged_data.get("output_cost_per_1m_tokens", 0)),
                 ),
                 resume=data.get("resume") is True,
                 ai_qa_enabled=bool(merged_data.get("ai_qa_enabled", True)),
@@ -390,8 +493,16 @@ def _write_provider_settings(data_dir: Path, settings: dict) -> None:
         "max_concurrency": normalize_max_concurrency(settings.get("max_concurrency", DEFAULT_MAX_CONCURRENCY)),
         "request_timeout": normalize_request_timeout(settings.get("request_timeout", DEFAULT_REQUEST_TIMEOUT)),
         "max_retries": normalize_max_retries(settings.get("max_retries", DEFAULT_MAX_RETRIES)),
+        "structured_output_enabled": bool(settings.get("structured_output_enabled", False)),
+        "memory_enabled": bool(settings.get("memory_enabled", False)),
+        "memory_project_id": str(settings.get("memory_project_id", "")),
         "ai_qa_enabled": bool(settings.get("ai_qa_enabled", True)),
         "auto_title_enabled": bool(settings.get("auto_title_enabled", False)),
+        "max_requests_per_minute": normalize_rate_limit(settings.get("max_requests_per_minute", 0)),
+        "max_tokens_per_minute": normalize_rate_limit(settings.get("max_tokens_per_minute", 0)),
+        "budget_limit": normalize_budget_limit(settings.get("budget_limit", 0)),
+        "input_cost_per_1m_tokens": normalize_cost_per_1m(settings.get("input_cost_per_1m_tokens", 0)),
+        "output_cost_per_1m_tokens": normalize_cost_per_1m(settings.get("output_cost_per_1m_tokens", 0)),
     }
     path = _provider_settings_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -411,8 +522,16 @@ def _public_provider_settings(settings: dict) -> dict:
         "max_concurrency": normalize_max_concurrency(settings.get("max_concurrency", DEFAULT_MAX_CONCURRENCY)),
         "request_timeout": normalize_request_timeout(settings.get("request_timeout", DEFAULT_REQUEST_TIMEOUT)),
         "max_retries": normalize_max_retries(settings.get("max_retries", DEFAULT_MAX_RETRIES)),
+        "structured_output_enabled": bool(settings.get("structured_output_enabled", False)),
+        "memory_enabled": bool(settings.get("memory_enabled", False)),
+        "memory_project_id": str(settings.get("memory_project_id", "")),
         "ai_qa_enabled": bool(settings.get("ai_qa_enabled", True)),
         "auto_title_enabled": bool(settings.get("auto_title_enabled", False)),
+        "max_requests_per_minute": normalize_rate_limit(settings.get("max_requests_per_minute", 0)),
+        "max_tokens_per_minute": normalize_rate_limit(settings.get("max_tokens_per_minute", 0)),
+        "budget_limit": normalize_budget_limit(settings.get("budget_limit", 0)),
+        "input_cost_per_1m_tokens": normalize_cost_per_1m(settings.get("input_cost_per_1m_tokens", 0)),
+        "output_cost_per_1m_tokens": normalize_cost_per_1m(settings.get("output_cost_per_1m_tokens", 0)),
     }
 
 
@@ -432,8 +551,16 @@ def _merge_provider_settings(data: dict, stored: dict) -> dict:
         "max_concurrency",
         "request_timeout",
         "max_retries",
+        "structured_output_enabled",
+        "memory_enabled",
+        "memory_project_id",
         "ai_qa_enabled",
         "auto_title_enabled",
+        "max_requests_per_minute",
+        "max_tokens_per_minute",
+        "budget_limit",
+        "input_cost_per_1m_tokens",
+        "output_cost_per_1m_tokens",
     ):
         if merged.get(key) in (None, "") and stored.get(key) not in (None, ""):
             merged[key] = stored[key]
@@ -462,7 +589,11 @@ def _parse_multipart_form(content_type: str, body: bytes) -> dict[str, FormPart]
     if not match:
         raise ValueError("multipart boundary missing")
     boundary = match.group("boundary").strip('"').encode("utf-8")
+    if not boundary:
+        raise ValueError("multipart boundary missing")
     delimiter = b"--" + boundary
+    if delimiter not in body:
+        raise ValueError("multipart body does not contain boundary")
     parts: dict[str, FormPart] = {}
     for raw_part in body.split(delimiter):
         if not raw_part or raw_part in {b"--", b"--\r\n"}:
@@ -491,7 +622,19 @@ def _parse_multipart_form(content_type: str, body: bytes) -> dict[str, FormPart]
             part_body = part_body[:-2]
         value = "" if filename else part_body.decode("utf-8", errors="replace")
         parts[name] = FormPart(name=name, value=value, content=part_body, filename=filename)
+    if not parts:
+        raise ValueError("multipart body contains no form parts")
     return parts
+
+
+def _max_upload_bytes() -> int:
+    raw_value = os.environ.get("BABEL_MAX_UPLOAD_MB", str(DEFAULT_MAX_UPLOAD_MB))
+    try:
+        megabytes = int(raw_value)
+    except ValueError:
+        megabytes = DEFAULT_MAX_UPLOAD_MB
+    megabytes = max(1, megabytes)
+    return megabytes * 1024 * 1024
 
 
 def _field_value(form: dict[str, FormPart], name: str, default: str) -> str:
@@ -499,6 +642,41 @@ def _field_value(form: dict[str, FormPart], name: str, default: str) -> str:
     if part is None:
         return default
     return part.value if part.value else default
+
+
+def _field_int(form: dict[str, FormPart], name: str) -> int | None:
+    value = _field_value(form, name, "").strip()
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
+
+
+def _glossary_export_extension(fmt: str) -> str:
+    value = fmt.lower().strip()
+    if value in {"md", "markdown", "preset"}:
+        return "md"
+    if value in {"tbx", "xml"}:
+        return "tbx"
+    if value == "json":
+        return "json"
+    return "csv"
+
+
+def _content_type_for_glossary_export(fmt: str) -> str:
+    ext = _glossary_export_extension(fmt)
+    if ext == "csv":
+        return "text/csv; charset=utf-8"
+    if ext == "tbx":
+        return "application/xml; charset=utf-8"
+    if ext == "json":
+        return "application/json; charset=utf-8"
+    return "text/markdown; charset=utf-8"
 
 
 def _content_type_for_download(path: Path) -> str:

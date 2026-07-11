@@ -28,7 +28,7 @@ Babel 会把电子书转成结构化翻译批次，在译文 XHTML 片段通过�
 
 - 保留章节文件、spine 顺序、CSS、图片、链接、锚点、ID 和行内强调。
 - 只抽取 XHTML 中人类可读的文本块，生成 JSONL 批次。
-- 翻译前生成 glossary 脚手架和 worker 指令。
+- 翻译前生成 glossary 脚手架；可选用 glossary preset 预置已知人名/术语决策；并生成 worker 指令。
 - 每个翻译批次必须先通过校验，才能回写。
 - Web 翻译支持可配置批次并发、请求超时、重试和失败任务继续。
 - 拒绝 `第 N 段译文` 这类假翻译/占位文本。
@@ -75,11 +75,11 @@ docker compose up --build
 http://127.0.0.1:7860
 ```
 
-Web UI 支持上传电子书、选择最终输出格式、查看/编辑 glossary、配置 API provider、选择并发/超时/重试设置、查看终端式进度、失败后继续任务，并下载翻译后的电子书和报告。
+Web UI 支持上传电子书、选择最终输出格式、查看/编辑 glossary、在术语表弹窗中导入/导出术语、配置 API provider、选择并发/超时/重试设置、查看终端式进度、失败后继续任务，并下载翻译后的电子书和报告。
 
 右上角 `Guide` 按钮会弹出推荐操作流程。语言切换支持英文和简体中文，并会保存到 `localStorage`。
 
-Docker 镜像内置 Calibre，可处理 MOBI/AZW3/PDF/DOCX/CBZ 等输入转换和非 EPUB 输出导出，并把私有任务数据保存在 `babel-data` volume 中。不要在没有认证保护的情况下把这个服务暴露到公网。
+Docker 镜像内置 Calibre，可处理 MOBI/AZW3/PDF/DOCX/CBZ 等输入转换和非 EPUB 输出导出，并把私有任务数据保存在 `babel-data` volume 中。不要在没有 `BABEL_WEB_TOKEN`、HTTPS 或其他可信认证层保护的情况下把这个服务暴露到公网。Web 上传默认限制为 200 MB，可通过 `BABEL_MAX_UPLOAD_MB` 调整。
 
 ## 从源码安装
 
@@ -105,6 +105,7 @@ python3 -m unittest discover -s tests -v
 
 ```bash
 npm install --prefix web
+npm test --prefix web
 npm run build --prefix web
 ```
 
@@ -131,12 +132,24 @@ MVP 支持的 provider：
 - `Anthropic Claude`：Anthropic Messages API。
 - `Fake Dry Run`：本地确定性输出，用来测试管线，不消耗 tokens。
 
+OpenAI-compatible provider 可通过 Web 设置里的 `结构化 JSON 输出` 或 MCP 的 `structured_output_enabled` 字段请求 JSON Schema 响应。Anthropic 仍使用 prompt 约束；返回文本仍会交给 Babel 的宽容解析器兜底。
+
+翻译记忆库可在 Web 设置中开启，也可通过 MCP 传入 `memory_enabled` 和稳定的 `memory_project_id`。Babel 会把完全匹配的源文片段存到 `BABEL_DATA_DIR/translation_memory/<project>.json`，每次命中仍会按当前 source row 做结构校验；有效命中会跳过 provider 调用，成功译文会写回项目记忆库。
+
+质量报告会把 locked glossary 修复和确定性 QA 汇总到一起，包含未翻译比例、长段源文残留、标点/引号漂移、人名漂移和按章节聚合的问题。Web 校验面板会展示摘要，完整 JSON 可通过 `AI QA JSON` 下载。
+
 运行参数：
 
 - `Concurrency`：默认 `3`，后端强制限制为 `1..8`。
 - `Request timeout`：默认 `300` 秒。
 - `Retries`：默认 `1`；仅 timeout、HTTP 429、HTTP 5xx 会重试。HTTP 400/401 不会重试。
 - 单个批次失败后，其他批次会继续执行。所有 worker 结束后，如果仍有失败批次，点击 `Resume Translation` 只重跑缺失、损坏或未通过校验的批次。
+
+安全与上传控制：
+
+- `BABEL_WEB_TOKEN`：可选的 API bearer token，启用后所有 `/api/*` 路由和下载接口都必须携带 `Authorization: Bearer <token>` 或 `X-Babel-Token: <token>`。该 token 不会出现在 `/api/meta` 或 provider settings 响应中。
+- `BABEL_MAX_UPLOAD_MB`：上传大小上限，单位 MB，默认 `200`。超限请求会在 multipart 解析前返回 HTTP 413。
+- `BABEL_CONVERSION_TIMEOUT`：Calibre `ebook-convert` 转换超时，单位秒，用于需要转换的输入或输出，默认 `600`。
 
 ## CLI 快速开始
 
@@ -149,6 +162,25 @@ babel-epub prepare \
   --glossary ./translation_glossary.md \
   --target-language "Simplified Chinese" \
   --max-blocks 120
+```
+
+可加 `--glossary-preset edge-chronicles` 使用内置 Edge Chronicles 词表 preset，也可以传入兼容 JSON preset 的文件路径。不传 preset 时，Babel 会保持通用抽取，只把项目专有词留给人工 review。
+
+`prepare` 可加 `--max-chars` 或 `--max-tokens`，在旧的 `--max-blocks` 块数上限之外按近似源文大小切分批次，避免长段落让 provider prompt 超出上下文。
+
+如果需要在 Web UI 之外管理翻译记忆库，可使用 CLI 导入、导出或查看统计：
+
+```bash
+babel-epub memory stats --project-id my-series --data-dir ./babel-data
+babel-epub memory export --project-id my-series --data-dir ./babel-data --file ./my-series-memory.json
+babel-epub memory import --project-id my-series --data-dir ./babel-data --file ./my-series-memory.json
+```
+
+结构化术语库也可以用 CSV、TBX、Markdown preset 或 JSON 导入/导出。导入会保留 `approved` / `pending` / `ignored` 状态和 `locked` 决策，并重新生成 worker 使用的紧凑 Markdown prompt：
+
+```bash
+babel-epub import-glossary --work-dir ./babel_work/book --file ./glossary.csv --mode upsert
+babel-epub export-glossary --work-dir ./babel_work/book --file ./glossary.tbx
 ```
 
 Babel 会生成：
@@ -174,7 +206,7 @@ translation_glossary.md
 babel-epub prepare --input-book ./input.azw3 --work-dir ./babel_work/book
 ```
 
-TXT/HTML 不需要外部工具。MOBI/AZW/PDF/DOCX/CBZ 等格式需要 Calibre `ebook-convert`；使用 Docker 镜像时已内置。
+TXT/HTML 不需要外部工具。MOBI/AZW/PDF/DOCX/CBZ 等格式需要 Calibre `ebook-convert`；使用 Docker 镜像时已内置。可用 `--conversion-timeout` 或 `BABEL_CONVERSION_TIMEOUT` 限制长时间转换。
 
 每个批次的译文需要写成匹配的 JSONL 行，放入 `pipeline/translated/`。
 
@@ -289,7 +321,7 @@ cp integrations/codex/babel/SKILL.md ~/.codex/skills/babel/SKILL.md
 
 详见 [integrations/claude](integrations/claude)。
 
-`start_translation` MCP tool 支持可选字段：`resume`、`max_concurrency`、`request_timeout`、`max_retries`，默认值与 Web UI 一致。
+`start_translation` MCP tool 支持可选字段：`resume`、`batch_filter`、`max_concurrency`、`request_timeout`、`max_retries`、`structured_output_enabled`、`memory_enabled`、`memory_project_id`、`memory_path`、`ai_qa_enabled`、`auto_title_enabled`、provider 速率限制和预算/成本字段，默认值与 Web UI 一致。MCP 也提供 `list_jobs`、`artifact_path`、`read_glossary_terms`、`update_glossary_terms`、`import_glossary`、`export_glossary`、`resume_failed_job`、`retry_batch`；`retry_batch` 会清除选中批次的 translated JSONL，并用单批过滤恢复。
 
 ## Plugin 还是 Skill？
 
@@ -322,6 +354,8 @@ source .venv/bin/activate
 python3 -m pip install -e .
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 -m py_compile src/babel_epub/*.py
+npm test --prefix web
+npm run build --prefix web
 docker compose config  # 可选，需要本机安装 Docker
 ```
 
