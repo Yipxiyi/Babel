@@ -1,7 +1,7 @@
 {
   "name": "babel-web",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.8.1",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -10,7 +10,9 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "@heroui/react": "^3.1.0",
     "@phosphor-icons/react": "^2.1.10",
+    "framer-motion": "^12.40.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

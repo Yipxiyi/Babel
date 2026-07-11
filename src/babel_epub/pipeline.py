@@ -345,7 +345,7 @@ def toc_labels(paths: EpubPaths, manifest: dict[str, dict]) -> dict[str, str]:
                 src = anchor.attrib.get("href", "").split("#", 1)[0]
                 if not src:
                     continue
-                rel = (nav_path.parent / src).resolve().relative_to(paths.root).as_posix()
+                rel = (nav_path.parent / src).resolve().relative_to(paths.root.resolve()).as_posix()
                 label = element_text(anchor)
                 if label:
                     labels.setdefault(rel, label)

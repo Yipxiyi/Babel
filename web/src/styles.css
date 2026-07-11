@@ -1,37 +1,48 @@
 @import "tailwindcss";
+@import "@heroui/react/styles";
 
 @theme {
   --font-sans: "Geist", "Satoshi", "Avenir Next", "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", "Cascadia Code", "Menlo", monospace;
-
-  --color-paper: oklch(95.7% 0.025 78);
-  --color-surface: oklch(98.4% 0.016 75);
-  --color-ink: oklch(19.5% 0.027 72);
-  --color-ink-soft: oklch(28% 0.031 72);
-  --color-muted: oklch(49.5% 0.028 70);
-  --color-line: oklch(84% 0.032 76);
-  --color-clay: oklch(57% 0.143 44);
-  --color-clay-dark: oklch(49% 0.14 41);
-  --color-terminal: oklch(15.5% 0.045 142);
-  --color-terminal-line: oklch(28% 0.055 142);
-  --color-terminal-ink: oklch(89% 0.054 128);
-  --color-terminal-muted: oklch(66% 0.055 128);
-  --color-terminal-accent: oklch(78% 0.111 74);
-  --color-terminal-info: oklch(76% 0.118 196);
-  --color-success: oklch(50% 0.11 145);
-  --color-danger: oklch(55% 0.16 24);
-  --color-info: oklch(56% 0.105 207);
-
-  --shadow-panel: 0 24px 70px -42px oklch(19.5% 0.027 72 / 0.42);
-  --shadow-action: 0 16px 28px -18px oklch(57% 0.143 44 / 0.8);
-  --shadow-terminal: inset 0 0 0 1px oklch(89% 0.054 128 / 0.08), 0 24px 50px -34px oklch(15.5% 0.045 142 / 0.9);
-  --shadow-modal: 0 40px 110px -55px oklch(19.5% 0.027 72 / 0.8);
-  --shadow-brand: 0 0 50px -18px oklch(76% 0.118 196 / 0.75), 0 0 68px -28px oklch(71% 0.16 170 / 0.65);
 }
 
 :root {
   color-scheme: light;
-  background: var(--color-paper);
+  --background: oklch(95.7% 0.025 78);
+  --foreground: oklch(19.5% 0.027 72);
+  --surface: oklch(98.4% 0.016 75);
+  --surface-secondary: oklch(94.8% 0.021 77);
+  --surface-tertiary: oklch(91.8% 0.026 76);
+  --muted: oklch(49.5% 0.028 70);
+  --default: oklch(91.2% 0.023 76);
+  --default-foreground: var(--foreground);
+  --accent: oklch(57% 0.143 44);
+  --accent-foreground: oklch(98.4% 0.016 75);
+  --success: oklch(50% 0.11 145);
+  --success-foreground: oklch(98.4% 0.016 75);
+  --danger: oklch(55% 0.16 24);
+  --danger-foreground: oklch(98.4% 0.016 75);
+  --warning: oklch(72% 0.13 72);
+  --warning-foreground: var(--foreground);
+  --field-background: var(--surface);
+  --field-foreground: var(--foreground);
+  --field-border: var(--border);
+  --field-border-width: 1px;
+  --field-radius: var(--radius-2xl);
+  --border: oklch(84% 0.032 76);
+  --separator: oklch(86% 0.026 76);
+  --focus: var(--accent);
+  --backdrop: oklch(19.5% 0.027 72 / 0.45);
+  --surface-shadow: 0 2px 8px 0 oklch(19.5% 0.027 72 / 0.06), 0 1px 2px 0 oklch(19.5% 0.027 72 / 0.08);
+  --overlay-shadow: 0 18px 52px -28px oklch(19.5% 0.027 72 / 0.46);
+  --field-shadow: 0 1px 2px 0 oklch(19.5% 0.027 72 / 0.05);
+  --babel-terminal: oklch(15.5% 0.045 142);
+  --babel-terminal-line: oklch(28% 0.055 142);
+  --babel-terminal-ink: oklch(89% 0.054 128);
+  --babel-terminal-muted: oklch(66% 0.055 128);
+  --babel-terminal-accent: oklch(78% 0.111 74);
+  --babel-terminal-info: oklch(76% 0.118 196);
+  background: var(--background);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -47,10 +58,10 @@ body {
   min-width: 320px;
   min-height: 100dvh;
   background:
-    radial-gradient(circle at 12% -10%, oklch(76% 0.118 196 / 0.18), transparent 26rem),
-    radial-gradient(circle at 96% 8%, oklch(71% 0.16 170 / 0.17), transparent 24rem),
-    radial-gradient(circle at 40% 24%, oklch(98.4% 0.016 75 / 0.75), transparent 30rem),
-    var(--color-paper);
+    radial-gradient(circle at 12% -10%, oklch(76% 0.118 196 / 0.14), transparent 26rem),
+    radial-gradient(circle at 96% 8%, color-mix(in oklab, var(--accent) 18%, transparent), transparent 24rem),
+    radial-gradient(circle at 40% 24%, color-mix(in oklab, var(--surface) 74%, transparent), transparent 30rem),
+    var(--background);
 }
 
 button,
@@ -74,35 +85,15 @@ a {
 }
 
 ::selection {
-  background: oklch(57% 0.143 44 / 0.22);
+  background: color-mix(in oklab, var(--accent) 22%, transparent);
 }
 
 .bg-atmosphere {
   background:
-    linear-gradient(90deg, oklch(19.5% 0.027 72 / 0.08) 1px, transparent 1px),
-    linear-gradient(0deg, oklch(19.5% 0.027 72 / 0.06) 1px, transparent 1px);
+    linear-gradient(90deg, color-mix(in oklab, var(--foreground) 8%, transparent) 1px, transparent 1px),
+    linear-gradient(0deg, color-mix(in oklab, var(--foreground) 6%, transparent) 1px, transparent 1px);
   background-size: 42px 42px;
   mask-image: radial-gradient(circle at top, black 0%, transparent 78%);
-}
-
-.bg-surface\/82 {
-  background-color: oklch(98.4% 0.016 75 / 0.82);
-}
-
-.bg-clay\/8 {
-  background-color: oklch(57% 0.143 44 / 0.08);
-}
-
-.bg-danger\/8 {
-  background-color: oklch(55% 0.16 24 / 0.08);
-}
-
-.bg-success\/8 {
-  background-color: oklch(50% 0.11 145 / 0.08);
-}
-
-.bg-info\/8 {
-  background-color: oklch(56% 0.105 207 / 0.08);
 }
 
 .terminal-line {
@@ -112,26 +103,26 @@ a {
 
 .terminal-line.event-failed,
 .terminal-line.event-error {
-  color: oklch(82% 0.09 24);
+  color: color-mix(in oklab, var(--danger) 62%, white);
 }
 
 .terminal-line.event-completed {
-  color: oklch(85% 0.08 145);
+  color: color-mix(in oklab, var(--success) 58%, white);
 }
 
 .terminal-line.event-batch-start {
-  color: oklch(91% 0.05 82);
+  color: color-mix(in oklab, var(--warning) 46%, white);
 }
 
 .terminal-line.event-batch-skip {
-  color: oklch(76% 0.08 206);
+  color: var(--babel-terminal-info);
 }
 
 .terminal-cursor {
   display: inline-block;
   width: 0.55rem;
   height: 1rem;
-  background: var(--color-terminal-ink);
+  background: var(--babel-terminal-ink);
   vertical-align: -0.2rem;
   animation: terminal-blink 1s steps(2, start) infinite;
 }
@@ -141,42 +132,13 @@ a {
   width: 0.55rem;
   height: 0.55rem;
   border-radius: 999px;
-  background: var(--color-terminal-muted);
-  box-shadow: 0 0 0 4px oklch(89% 0.054 128 / 0.08);
+  background: var(--babel-terminal-muted);
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--babel-terminal-ink) 8%, transparent);
 }
 
 .status-light.is-running {
-  background: var(--color-terminal-ink);
+  background: var(--babel-terminal-ink);
   animation: status-pulse 1.35s ease-out infinite;
-}
-
-.progress-track {
-  position: relative;
-}
-
-.progress-track.is-running::after {
-  animation: progress-shimmer 1.3s cubic-bezier(0.16, 1, 0.3, 1) infinite;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    oklch(98.4% 0.016 75 / 0.72),
-    transparent
-  );
-  content: "";
-  inset: 0;
-  position: absolute;
-  transform: translateX(-100%);
-}
-
-.autofill-progress {
-  position: relative;
-}
-
-.autofill-progress-fill {
-  animation: autofill-progress-sweep 1.15s cubic-bezier(0.16, 1, 0.3, 1) infinite;
-  min-width: 38%;
-  transform: translateX(-110%);
-  width: 42%;
 }
 
 @keyframes terminal-blink {
@@ -187,22 +149,10 @@ a {
 
 @keyframes status-pulse {
   0% {
-    box-shadow: 0 0 0 0 oklch(89% 0.054 128 / 0.35);
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--babel-terminal-ink) 35%, transparent);
   }
   100% {
-    box-shadow: 0 0 0 12px oklch(89% 0.054 128 / 0);
-  }
-}
-
-@keyframes progress-shimmer {
-  100% {
-    transform: translateX(100%);
-  }
-}
-
-@keyframes autofill-progress-sweep {
-  100% {
-    transform: translateX(260%);
+    box-shadow: 0 0 0 12px color-mix(in oklab, var(--babel-terminal-ink) 0%, transparent);
   }
 }
 
@@ -216,13 +166,4 @@ a {
     animation-iteration-count: 1 !important;
   }
 
-  .progress-track.is-running::after {
-    display: none;
-  }
-
-  .autofill-progress-fill {
-    animation: none;
-    transform: none;
-    width: 100%;
-  }
 }
