@@ -160,7 +160,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("glossary-terms/autofill", app_source)
         self.assertIn("GlossaryModal", app_source)
         self.assertIn("AI Fill Translations", app_source)
-        self.assertIn("autofill-progress", app_source)
+        self.assertIn("ProgressBar isIndeterminate", app_source)
         self.assertIn("Drafting glossary translations", app_source)
         self.assertIn("Approve all", app_source)
         self.assertIn("Review Glossary", app_source)
@@ -174,7 +174,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("Auto-generate output title", app_source)
         self.assertIn("onDrop", app_source)
         self.assertIn("Process terminal collapsed", app_source)
-        self.assertIn("progress-track", app_source)
+        self.assertIn("ProgressBar value={percent}", app_source)
 
     def test_static_asset_resolver_serves_assets_without_path_traversal(self) -> None:
         assets = sorted((ROOT / "src" / "babel_epub" / "static" / "assets").glob("index-*.js"))

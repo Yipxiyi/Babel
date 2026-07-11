@@ -1,5 +1,30 @@
-import type * as React from "react";
+import * as React from "react";
 import { forwardRef, useEffect, useRef, useState } from "react";
+import {
+  Alert,
+  AlertDialog,
+  Button as HeroButton,
+  Card as HeroCard,
+  Chip,
+  CloseButton,
+  Description,
+  Disclosure,
+  FieldError,
+  Form,
+  Input as HeroInput,
+  Label,
+  Link as HeroLink,
+  ListBox,
+  Modal,
+  NumberField,
+  Pagination,
+  ProgressBar,
+  SearchField,
+  Select as HeroSelect,
+  Switch as HeroSwitch,
+  Table as HeroTable,
+  TextField,
+} from "@heroui/react";
 import {
   ArrowClockwise,
   CaretDown,
@@ -17,7 +42,7 @@ import {
   Play,
   Plus,
   Question,
-  Table,
+  Table as TableIcon,
   TerminalWindow,
   WarningCircle,
   X,
@@ -574,7 +599,7 @@ const dictionaries = {
 
 function App() {
   const [locale, setLocale] = useState<Locale>(() => (localStorage.getItem("babel_locale") === "zh" ? "zh" : "en"));
-  const [meta, setMeta] = useState<Meta>({ version: "0.8.0", github_url: "https://github.com/Yipxiyi/Babel", supported_input_formats: [], supported_output_formats: [] });
+  const [meta, setMeta] = useState<Meta>({ version: "0.8.1", github_url: "https://github.com/Yipxiyi/Babel", supported_input_formats: [], supported_output_formats: [] });
   const [job, setJob] = useState<BabelJob | null>(null);
   const [currentJobId, setCurrentJobId] = useState("");
   const [terms, setTerms] = useState<GlossaryTerm[]>([]);
@@ -585,6 +610,7 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
   const [glossaryOpen, setGlossaryOpen] = useState(false);
+  const [startWarningOpen, setStartWarningOpen] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
@@ -913,18 +939,13 @@ function App() {
     }
   }
 
-  async function handleStart(resume: boolean) {
+  async function handleStart(resume: boolean, skipGlossaryWarning = false) {
     if (!currentJobId) {
       return;
     }
-    if (!resume && hasGlossaryWarnings(terms)) {
-      const stats = glossaryStats(terms);
-      const confirmed = window.confirm(
-        `${t.startPendingTitle}\n\n${t.startPendingBody}\n\n${t.pending}: ${stats.pending} · ${t.emptyDrafts}: ${stats.empty}`,
-      );
-      if (!confirmed) {
-        return;
-      }
+    if (!resume && !skipGlossaryWarning && hasGlossaryWarnings(terms)) {
+      setStartWarningOpen(true);
+      return;
     }
     setIsStarting(true);
     setNotice({ kind: "info", text: resume ? t.noticeResume : t.noticeStarted });
@@ -1042,7 +1063,7 @@ function App() {
   const titleMode = provider.auto_title_enabled && canUseProvider(provider, hasSavedApiKey) ? t.generatedTitle : t.suffixTitle;
 
   return (
-    <div className="min-h-[100dvh] overflow-x-hidden bg-paper text-ink">
+    <div className="min-h-[100dvh] overflow-x-hidden bg-background text-foreground">
       <div className="pointer-events-none fixed inset-0 -z-10 bg-atmosphere" />
       <AppHeader
         locale={locale}
@@ -1113,7 +1134,7 @@ function App() {
           <ValidationPanel t={t} job={job} tone={tone} />
         </Panel>
       </main>
-      <footer className="mx-auto flex w-full max-w-[1480px] flex-col gap-3 border-t border-ink/15 px-4 py-6 text-xs text-muted md:px-6 lg:flex-row lg:items-center lg:justify-between">
+      <footer className="mx-auto flex w-full max-w-[1480px] flex-col gap-3 border-t border-border px-4 py-6 text-xs text-muted md:px-6 lg:flex-row lg:items-center lg:justify-between">
         <span>Babel is open source software licensed under the MIT License.</span>
         <span className="inline-flex items-center gap-2 font-mono uppercase tracking-[0.22em]">Built with Babel</span>
       </footer>
@@ -1167,6 +1188,17 @@ function App() {
         />
       ) : null}
       {authOpen ? <AuthModal t={t} onUnlock={handleUnlock} /> : null}
+      {startWarningOpen ? (
+        <StartWarningModal
+          t={t}
+          stats={glossaryStats(terms)}
+          onClose={() => setStartWarningOpen(false)}
+          onConfirm={() => {
+            setStartWarningOpen(false);
+            void handleStart(false, true);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1187,16 +1219,16 @@ function AppHeader({
   onOpenSettings: () => void;
 }) {
   return (
-    <header className="mx-auto flex w-full max-w-[1480px] flex-col gap-5 border-b border-ink/20 px-4 py-5 md:px-6 lg:flex-row lg:items-center lg:justify-between">
+    <header className="mx-auto flex w-full max-w-[1480px] flex-col gap-5 border-b border-border px-4 py-5 md:px-6 lg:flex-row lg:items-center lg:justify-between">
       <div className="flex min-w-0 items-center gap-4">
-        <img className="size-16 shrink-0 rounded-2xl border border-ink/15 object-cover shadow-brand" src={babelIconUrl} alt="Babel project icon" />
+        <img className="size-16 shrink-0 rounded-3xl object-cover shadow-surface" src={babelIconUrl} alt="Babel project icon" />
         <div className="min-w-0">
           <div className="flex flex-wrap items-end gap-3">
             <h1 className="text-5xl font-black leading-none tracking-[-0.035em] md:text-6xl">Babel</h1>
             <div className="hidden pb-2 font-mono text-[0.68rem] uppercase tracking-[0.22em] text-muted sm:block">{t.appSubtitle}</div>
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
-            <span className="rounded-full border border-clay/40 bg-clay/10 px-3 py-1 font-mono uppercase tracking-[0.16em] text-clay">{t.statusBadge}</span>
+            <Chip color="accent" size="sm" variant="soft">{t.statusBadge}</Chip>
             <span>v{meta.version}</span>
           </div>
         </div>
@@ -1212,15 +1244,16 @@ function AppHeader({
 
 function HeaderAction({ onClick, icon: Icon, label, ariaLabel }: { onClick: () => void; icon: IconComponent; label: string; ariaLabel?: string }) {
   return (
-    <button
+    <Button
       type="button"
-      className="inline-flex min-h-11 min-w-28 items-center justify-center gap-2 rounded-xl border border-ink/15 bg-surface/80 px-4 py-2.5 text-sm font-bold text-ink transition duration-200 hover:-translate-y-0.5 hover:border-clay/45 hover:bg-surface active:translate-y-px focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-clay"
+      className="min-w-28"
       onClick={onClick}
       aria-label={ariaLabel}
+      variant="ghost"
     >
       <Icon size={18} weight="bold" />
       {label}
-    </button>
+    </Button>
   );
 }
 
@@ -1228,10 +1261,16 @@ type PanelProps = { title: string; className?: string; children: React.ReactNode
 
 const Panel = forwardRef<HTMLElement, PanelProps>(function PanelComponent({ title, className, children }, ref) {
   return (
-    <section ref={ref} className={cn("rounded-2xl border border-ink/15 bg-surface/82 p-5 shadow-panel backdrop-blur", className)}>
-      <h2 className="mb-4 font-mono text-sm font-bold uppercase tracking-[0.16em] text-ink">{title}</h2>
-      {children}
-    </section>
+    <HeroCard
+      ref={ref as React.Ref<HTMLDivElement>}
+      variant="default"
+      className={className}
+    >
+      <HeroCard.Header>
+        <HeroCard.Title>{title}</HeroCard.Title>
+      </HeroCard.Header>
+      <HeroCard.Content>{children}</HeroCard.Content>
+    </HeroCard>
   );
 });
 
@@ -1261,13 +1300,13 @@ function UploadPanel({
   onUpdateForm: <K extends keyof FormState>(key: K, value: FormState[K]) => void;
 }) {
   return (
-    <form className="space-y-4" onSubmit={onPrepare}>
+    <Form className="space-y-4" onSubmit={onPrepare}>
       <div>
         <h3 className="mb-3 text-lg font-bold tracking-tight">{t.uploadTitle}</h3>
         <label
           className={cn(
-            "group flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed px-5 py-8 text-center transition",
-            isDragging ? "border-clay bg-clay/8" : "border-clay/55 bg-paper/70 hover:-translate-y-0.5 hover:bg-clay/8",
+            "group flex cursor-pointer flex-col items-center justify-center rounded-3xl border border-dashed px-5 py-8 text-center transition",
+            isDragging ? "border-accent bg-accent-soft" : "border-accent/55 bg-default/70 hover:bg-accent-soft",
           )}
           onDragEnter={(event) => {
             event.preventDefault();
@@ -1295,60 +1334,46 @@ function UploadPanel({
             accept={ACCEPT_EXTENSIONS}
             onChange={(event) => onAcceptFile(event.target.files?.[0])}
           />
-          <FileArrowUp size={42} className="mb-4 text-clay transition group-hover:scale-105" weight="duotone" />
+          <FileArrowUp size={42} className="mb-4 text-accent transition group-hover:scale-105" weight="duotone" />
           <span className="text-base font-bold">{isDragging ? t.dropActive : t.dropTitle}</span>
           <span className="mt-1 text-sm text-muted">{t.dropHint}</span>
           <span className="mt-4 text-xs text-muted">{t.fileLocal}</span>
         </label>
-        <div className="mt-3 flex items-center justify-between rounded-xl border border-ink/12 bg-surface px-4 py-3">
+        <div className="mt-3 rounded-2xl bg-default px-4 py-3">
           <span className="min-w-0 truncate text-sm font-semibold">{selectedFileName || t.noFile}</span>
-          <X size={17} className="text-muted" weight="bold" />
         </div>
       </div>
       <LanguageSelect label={t.targetLanguage} value={form.target_language} onChange={(value) => onUpdateForm("target_language", value)} />
       <Field label={t.outputTitle} helper={`${t.titleState}: ${titleMode}`}>
         <Input name="title" value={form.title} placeholder={titleMode} onChange={(event) => onUpdateForm("title", event.target.value)} />
       </Field>
-      <Field label={t.outputFormat} helper={t.formatHelper}>
-        <Select name="output_format" value={form.output_format} onChange={(event) => onUpdateForm("output_format", event.target.value)}>
+      <Select label={t.outputFormat} helper={t.formatHelper} name="output_format" value={form.output_format} onChange={(event) => onUpdateForm("output_format", event.target.value)}>
           {outputFormats.map((format) => (
             <option key={format.value} value={format.value}>
               {format.label}
             </option>
           ))}
-        </Select>
-      </Field>
-      <Field label={t.batchChars} helper={t.batchCharsHelp}>
-        <Input
-          name="max_chars"
-          type="number"
-          min={1}
-          step={100}
-          value={form.max_chars}
-          onChange={(event) => onUpdateForm("max_chars", event.target.value)}
-        />
-      </Field>
+      </Select>
+      <NumberInputField label={t.batchChars} helper={t.batchCharsHelp} name="max_chars" minValue={1} step={100} value={form.max_chars} onChange={(value) => onUpdateForm("max_chars", value)} />
       <Button type="submit" disabled={isPreparing}>
         <FileArrowUp size={18} weight="bold" />
         {isPreparing ? t.preparing : t.prepare}
       </Button>
-    </form>
+    </Form>
   );
 }
 
 function LanguageSelect({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
   const hasKnownValue = Boolean(findLanguage(value));
   return (
-    <Field label={label}>
-      <Select name="target_language" value={value} onChange={(event) => onChange(event.target.value)}>
+    <Select label={label} name="target_language" value={value} onChange={(event) => onChange(event.target.value)}>
         {!hasKnownValue && value ? <option value={value}>{value}</option> : null}
         {languages.map((language) => (
           <option key={language.code} value={language.label}>
             {language.zh} / {language.label}
           </option>
         ))}
-      </Select>
-    </Field>
+    </Select>
   );
 }
 
@@ -1378,14 +1403,14 @@ function GlossarySummary({
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h3 className="flex items-center gap-2 text-lg font-bold tracking-tight">
-            <Table size={20} weight="bold" />
+            <TableIcon size={20} weight="bold" />
             {t.glossarySummaryTitle}
           </h3>
           <p className="mt-1 max-w-[62ch] text-sm leading-relaxed text-muted">{t.glossarySummaryHint}</p>
         </div>
         <div className="flex w-full flex-col gap-2 sm:w-56">
           <Button className="w-full whitespace-nowrap" type="button" variant="ghost" disabled={!canReview} onClick={onReview}>
-            <Table size={18} weight="bold" />
+            <TableIcon size={18} weight="bold" />
             {t.reviewGlossary}
           </Button>
           <Button className="w-full whitespace-nowrap" type="button" variant="secondary" disabled={!canAutofill || isAutofilling} onClick={onAutofill}>
@@ -1395,16 +1420,16 @@ function GlossarySummary({
         </div>
       </div>
       {isAutofilling ? (
-        <div className="mt-4 rounded-2xl border border-clay/30 bg-clay/8 px-4 py-3" role="status" aria-live="polite">
-          <div className="flex items-center justify-between gap-4 text-sm">
-            <span className="font-bold text-ink">{t.aiFillingTranslations}</span>
-            <span className="font-mono text-[0.68rem] uppercase tracking-[0.14em] text-clay">working</span>
-          </div>
-          <div className="autofill-progress mt-3 h-2 overflow-hidden rounded-full bg-paper" aria-label={t.aiFillingProgress}>
-            <div className="autofill-progress-fill h-full rounded-full bg-clay" />
-          </div>
-          <p className="mt-2 text-xs leading-relaxed text-muted">{t.aiFillingProgress}</p>
-        </div>
+        <Alert status="accent" className="mt-4" role="status" aria-live="polite">
+          <Alert.Indicator />
+          <Alert.Content>
+            <Alert.Title>{t.aiFillingTranslations}</Alert.Title>
+            <ProgressBar isIndeterminate color="accent" size="sm" aria-label={t.aiFillingProgress} className="mt-3">
+              <ProgressBar.Track><ProgressBar.Fill /></ProgressBar.Track>
+            </ProgressBar>
+            <Alert.Description className="mt-2">{t.aiFillingProgress}</Alert.Description>
+          </Alert.Content>
+        </Alert>
       ) : null}
       <EstimatePanel title={t.estimateTitle} label={t.glossaryEstimate} value={terms.length ? glossaryEstimate : t.estimateUnavailable} />
       <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-5">
@@ -1458,33 +1483,38 @@ function GlossaryModal({
   onSave: () => void;
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
-  useModalBehavior(onClose, closeRef);
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-ink/45 px-4 py-6 backdrop-blur-sm" onMouseDown={onClose}>
-      <div role="dialog" aria-modal="true" aria-labelledby="glossary-title" className="max-h-[88dvh] w-full max-w-6xl overflow-y-auto rounded-2xl border border-ink/15 bg-paper p-5 shadow-modal" onMouseDown={(event) => event.stopPropagation()}>
-        <GlossaryTable
-          t={t}
-          terms={terms}
-          search={search}
-          typeFilter={typeFilter}
-          statusFilter={statusFilter}
-          canSave={canSave}
-          isSaving={isSaving}
-          isImporting={isImporting}
-          closeRef={closeRef}
-          onClose={onClose}
-          onSearch={onSearch}
-          onTypeFilter={onTypeFilter}
-          onStatusFilter={onStatusFilter}
-          onUpdateTerm={onUpdateTerm}
-          onAddTerm={onAddTerm}
-          onApproveAll={onApproveAll}
-          onImport={onImport}
-          onExport={onExport}
-          onSave={onSave}
-        />
-      </div>
-    </div>
+    <>
+      <Modal.Backdrop isOpen onOpenChange={(isOpen) => !isOpen && onClose()} variant="blur">
+        <Modal.Container size="full" scroll="inside" className="p-4 md:p-6">
+          <Modal.Dialog aria-labelledby="glossary-title" className="mx-auto max-h-[88dvh] w-full max-w-6xl overflow-y-auto">
+            <Modal.Body className="p-0">
+              <GlossaryTable
+                t={t}
+                terms={terms}
+                search={search}
+                typeFilter={typeFilter}
+                statusFilter={statusFilter}
+                canSave={canSave}
+                isSaving={isSaving}
+                isImporting={isImporting}
+                closeRef={closeRef}
+                onClose={onClose}
+                onSearch={onSearch}
+                onTypeFilter={onTypeFilter}
+                onStatusFilter={onStatusFilter}
+                onUpdateTerm={onUpdateTerm}
+                onAddTerm={onAddTerm}
+                onApproveAll={onApproveAll}
+                onImport={onImport}
+                onExport={onExport}
+                onSave={onSave}
+              />
+            </Modal.Body>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+    </>
   );
 }
 
@@ -1533,7 +1563,7 @@ function GlossaryTable({
   const [pageSize, setPageSize] = useState(25);
   const [glossaryFormat, setGlossaryFormat] = useState("csv");
   const importInputRef = useRef<HTMLInputElement>(null);
-  const filtered = terms.map((term, index) => ({ term, index })).filter(({ term }) => {
+  const filtered = terms.map((term, index) => ({ id: `${term.source}-${index}`, term, index })).filter(({ term }) => {
     const text = `${term.source} ${term.translation} ${term.aliases.join(" ")} ${term.type} ${term.status}`.toLowerCase();
     return (
       (!search || text.includes(search.toLowerCase())) &&
@@ -1570,84 +1600,86 @@ function GlossaryTable({
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h2 id="glossary-title" className="flex items-center gap-2 text-lg font-bold tracking-tight">
-            <Table size={20} weight="bold" />
+            <TableIcon size={20} weight="bold" />
             {t.glossaryTitle}
           </h2>
           <p className="mt-1 max-w-[62ch] text-sm leading-relaxed text-muted">{t.glossaryHint}</p>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <div className="relative min-w-0 sm:w-64">
-            <Input className="pl-10" value={search} placeholder={t.searchTerms} onChange={(event) => onSearch(event.target.value)} />
-            <MagnifyingGlass size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" weight="bold" />
-          </div>
-          <Select value={typeFilter} onChange={(event) => onTypeFilter(event.target.value)}>
+          <SearchField className="min-w-0 sm:w-64" value={search} onChange={onSearch} aria-label={t.searchTerms}>
+            <SearchField.Group>
+              <SearchField.SearchIcon><MagnifyingGlass size={18} weight="bold" /></SearchField.SearchIcon>
+              <SearchField.Input placeholder={t.searchTerms} />
+              <SearchField.ClearButton aria-label={t.close} />
+            </SearchField.Group>
+          </SearchField>
+          <Select aria-label={t.typeFilter} value={typeFilter} onChange={(event) => onTypeFilter(event.target.value)}>
             <option value="all">{t.typeFilter}: {t.all}</option>
             {types.map((type) => (
               <option key={type} value={type}>{type}</option>
             ))}
           </Select>
-          <Select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value)}>
+          <Select aria-label={t.statusFilter} value={statusFilter} onChange={(event) => onStatusFilter(event.target.value)}>
             <option value="all">{t.statusFilter}: {t.all}</option>
             {statuses.map((status) => (
               <option key={status} value={status}>{status}</option>
             ))}
           </Select>
-          <button ref={closeRef} type="button" className="grid size-10 shrink-0 place-items-center rounded-xl border border-ink/15 bg-surface text-ink transition hover:-translate-y-0.5 hover:border-clay/45 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-clay" onClick={onClose} aria-label={t.close}>
+          <CloseButton ref={closeRef} onPress={onClose} aria-label={t.close}>
             <X size={18} weight="bold" />
-          </button>
+          </CloseButton>
         </div>
       </div>
-      <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-ink/10 bg-surface/70 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="font-mono text-[0.72rem] uppercase tracking-[0.13em] text-muted">
+      <Pagination className="mt-4 flex flex-col gap-3 rounded-3xl bg-surface-secondary px-4 py-3 sm:flex-row sm:items-center sm:justify-between" aria-label={t.page}>
+        <Pagination.Summary className="font-mono text-[0.72rem] uppercase tracking-[0.13em] text-muted">
           {filtered.length
             ? `${t.showing} ${startIndex + 1}-${endIndex} ${t.of} ${filtered.length} · ${t.page} ${currentPage}/${totalPages}`
             : `${t.showing} 0 ${t.of} 0`}
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="flex items-center gap-2 text-xs font-bold text-muted">
+        </Pagination.Summary>
+        <Pagination.Content className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-2 text-xs font-bold text-muted">
             <span>{t.rowsPerPage}</span>
-            <Select value={String(pageSize)} onChange={(event) => setPageSize(Number.parseInt(event.target.value, 10))}>
+            <Select aria-label={t.rowsPerPage} value={String(pageSize)} onChange={(event) => setPageSize(Number.parseInt(event.target.value, 10))}>
               {[10, 25, 50, 100].map((size) => (
                 <option key={size} value={size}>{size}</option>
               ))}
             </Select>
-          </label>
-          <Button type="button" variant="ghost" disabled={currentPage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
-            {t.previousPage}
-          </Button>
-          <Button type="button" variant="ghost" disabled={currentPage >= totalPages || !filtered.length} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>
-            {t.nextPage}
-          </Button>
-        </div>
-      </div>
-      <div className="mt-5 overflow-x-auto rounded-2xl border border-ink/12 bg-paper/70">
+          </div>
+          <Pagination.Item>
+            <Pagination.Previous isDisabled={currentPage <= 1} onPress={() => setPage((value) => Math.max(1, value - 1))}>{t.previousPage}</Pagination.Previous>
+          </Pagination.Item>
+          <Pagination.Item>
+            <Pagination.Next isDisabled={currentPage >= totalPages || !filtered.length} onPress={() => setPage((value) => Math.min(totalPages, value + 1))}>{t.nextPage}</Pagination.Next>
+          </Pagination.Item>
+        </Pagination.Content>
+      </Pagination>
+      <HeroTable variant="primary" className="mt-5">
         {filtered.length ? (
-          <table className="min-w-[980px] w-full border-collapse text-left text-sm">
-            <thead className="border-b border-ink/12 bg-surface">
-              <tr className="font-mono text-[0.68rem] uppercase tracking-[0.13em] text-muted">
-                <th className="px-3 py-3">{t.source}</th>
-                <th className="px-3 py-3">{t.translation}</th>
-                <th className="px-3 py-3">{t.type}</th>
-                <th className="px-3 py-3">{t.aliases}</th>
-                <th className="px-3 py-3">{t.frequency}</th>
-                <th className="px-3 py-3">{t.evidence}</th>
-                <th className="px-3 py-3">{t.state}</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-ink/10">
-              {pageRows.map(({ term, index: originalIndex }) => {
-                return (
-                  <tr key={`${term.source}-${originalIndex}`} className="align-top">
-                    <td className="px-3 py-3"><TableInput value={term.source} onChange={(value) => onUpdateTerm(originalIndex, { source: value })} /></td>
-                    <td className="px-3 py-3"><TableInput value={term.translation} onChange={(value) => onUpdateTerm(originalIndex, { translation: value })} /></td>
-                    <td className="px-3 py-3"><TableInput value={term.type} onChange={(value) => onUpdateTerm(originalIndex, { type: value })} /></td>
-                    <td className="px-3 py-3">
-                      <TableInput value={term.aliases.join(", ")} onChange={(value) => onUpdateTerm(originalIndex, { aliases: value.split(",").map((item) => item.trim()).filter(Boolean) })} />
-                    </td>
-                    <td className="px-3 py-3 font-mono text-xs text-muted">{term.frequency}</td>
-                    <td className="max-w-[280px] px-3 py-3 text-xs leading-relaxed text-muted">{term.evidence?.[0] || ""}</td>
-                    <td className="px-3 py-3">
+          <HeroTable.ScrollContainer className="overflow-x-auto">
+            <HeroTable.Content aria-label={t.glossaryTitle} className="min-w-[980px] w-full border-collapse text-left text-sm">
+              <HeroTable.Header>
+                <HeroTable.Column isRowHeader>{t.source}</HeroTable.Column>
+                <HeroTable.Column>{t.translation}</HeroTable.Column>
+                <HeroTable.Column>{t.type}</HeroTable.Column>
+                <HeroTable.Column>{t.aliases}</HeroTable.Column>
+                <HeroTable.Column>{t.frequency}</HeroTable.Column>
+                <HeroTable.Column>{t.evidence}</HeroTable.Column>
+                <HeroTable.Column>{t.state}</HeroTable.Column>
+              </HeroTable.Header>
+              <HeroTable.Body items={pageRows}>
+              {({ id, term, index: originalIndex }) => (
+                  <HeroTable.Row id={id} className="align-top">
+                    <HeroTable.Cell><TableInput ariaLabel={`${t.source}: ${term.source}`} value={term.source} onChange={(value) => onUpdateTerm(originalIndex, { source: value })} /></HeroTable.Cell>
+                    <HeroTable.Cell><TableInput ariaLabel={`${t.translation}: ${term.source}`} value={term.translation} onChange={(value) => onUpdateTerm(originalIndex, { translation: value })} /></HeroTable.Cell>
+                    <HeroTable.Cell><TableInput ariaLabel={`${t.type}: ${term.source}`} value={term.type} onChange={(value) => onUpdateTerm(originalIndex, { type: value })} /></HeroTable.Cell>
+                    <HeroTable.Cell>
+                      <TableInput ariaLabel={`${t.aliases}: ${term.source}`} value={term.aliases.join(", ")} onChange={(value) => onUpdateTerm(originalIndex, { aliases: value.split(",").map((item) => item.trim()).filter(Boolean) })} />
+                    </HeroTable.Cell>
+                    <HeroTable.Cell className="font-mono text-xs text-muted">{term.frequency}</HeroTable.Cell>
+                    <HeroTable.Cell className="max-w-[280px] text-xs leading-relaxed text-muted">{term.evidence?.[0] || ""}</HeroTable.Cell>
+                    <HeroTable.Cell>
                       <Select
+                        aria-label={`${t.state}: ${term.source}`}
                         value={term.status}
                         onChange={(event) => onUpdateTerm(originalIndex, { status: event.target.value, locked: event.target.value === "approved" })}
                       >
@@ -1655,27 +1687,26 @@ function GlossaryTable({
                         <option value="pending">pending</option>
                         <option value="ignored">ignored</option>
                       </Select>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                    </HeroTable.Cell>
+                  </HeroTable.Row>
+              )}
+              </HeroTable.Body>
+            </HeroTable.Content>
+          </HeroTable.ScrollContainer>
         ) : (
           <div className="px-5 py-12 text-center text-sm text-muted">{t.noTerms}</div>
         )}
-      </div>
+      </HeroTable>
       <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap items-center gap-2">
-          <label className="flex items-center gap-2 text-xs font-bold text-muted">
-            <span>{t.glossaryFormat}</span>
-            <Select value={glossaryFormat} onChange={(event) => setGlossaryFormat(event.target.value)}>
+          <div className="flex items-center gap-2 text-xs font-bold text-muted">
+            <Select label={t.glossaryFormat} value={glossaryFormat} onChange={(event) => setGlossaryFormat(event.target.value)}>
               <option value="csv">CSV</option>
               <option value="tbx">TBX</option>
               <option value="md">Markdown</option>
               <option value="json">JSON</option>
             </Select>
-          </label>
+          </div>
           <input ref={importInputRef} className="sr-only" type="file" accept=".csv,.tbx,.xml,.md,.markdown,.json,text/csv,text/markdown,application/json,application/xml" onChange={handleImportFile} />
           <Button type="button" variant="ghost" disabled={!canSave || isImporting} onClick={() => importInputRef.current?.click()}>
             <FileArrowUp size={18} weight="bold" />
@@ -1716,21 +1747,23 @@ function JobSummary({ t, job, tone, percent, notice }: { t: (typeof dictionaries
       : t.estimateDone
     : t.estimateUnavailable;
   return (
-    <div className="rounded-2xl border border-ink/12 bg-surface p-4">
+    <HeroCard variant="secondary">
       <div className="flex flex-col gap-5 lg:flex-row lg:items-start">
-        <div className="relative flex h-20 shrink-0 items-center rounded-2xl border border-ink/10 bg-paper px-5 lg:h-32 lg:w-40 lg:justify-center">
+        <HeroCard variant="tertiary" className="relative flex h-20 shrink-0 items-center px-5 lg:h-32 lg:w-40 lg:justify-center">
           <div className="text-4xl font-black tracking-tight">{percent}%</div>
           <div className="ml-3 font-mono text-[0.62rem] uppercase tracking-[0.16em] text-muted lg:absolute lg:bottom-5 lg:ml-0">{t.completed}</div>
-        </div>
+        </HeroCard>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <StatusPill status={job?.status || "idle"} tone={tone} />
           </div>
           <h3 className="mt-3 text-xl font-bold tracking-tight [text-wrap:balance]">{job?.filename || t.noJob}</h3>
           <p className="mt-1 min-h-5 text-sm leading-relaxed text-muted">{job?.message || "Prepare a workspace to begin."}</p>
-          <div className={cn("progress-track mt-4 h-3 overflow-hidden rounded-full bg-line", tone === "running" && "is-running")}>
-            <div className="progress-fill h-full rounded-full bg-clay transition-[width] duration-300" style={{ width: `${percent}%` }} />
-          </div>
+          <ProgressBar value={percent} minValue={0} maxValue={100} color="accent" size="lg" aria-label={t.jobProgress} className="mt-4">
+            <ProgressBar.Track>
+              <ProgressBar.Fill />
+            </ProgressBar.Track>
+          </ProgressBar>
           <EstimatePanel title={t.estimateTitle} label={t.translationEstimate} value={translationEstimate} />
           {job?.status === "completed" ? <UsagePanel t={t} usage={job.usage_summary} /> : null}
           <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -1745,40 +1778,42 @@ function JobSummary({ t, job, tone, percent, notice }: { t: (typeof dictionaries
           {notice ? <NoticeBar notice={notice} /> : null}
         </div>
       </div>
-    </div>
+    </HeroCard>
   );
 }
 
 function TerminalLog({ t, events, status, terminalRef, open, onToggle }: { t: (typeof dictionaries)[Locale]; events: JobEvent[]; status?: JobStatus; terminalRef: React.RefObject<HTMLDivElement | null>; open: boolean; onToggle: () => void }) {
   return (
-    <div className="mt-5 overflow-hidden rounded-2xl border border-terminal-line bg-terminal text-terminal-ink shadow-terminal">
-      <button type="button" className="flex w-full items-center justify-between border-b border-terminal-line px-4 py-3 text-left" onClick={onToggle}>
-        <span className="inline-flex items-center gap-2 font-mono text-xs font-bold uppercase tracking-[0.16em]">
-          <TerminalWindow size={17} weight="bold" />
-          {open ? t.terminalTitle : `${t.terminalCollapsed} · ${events.length} events`}
-        </span>
-        <span className="inline-flex items-center gap-3">
-          <span className={cn("status-light", status === "running" && "is-running")} aria-label={status || "idle"} />
-          <span className="font-mono text-xs text-terminal-muted">{open ? t.collapse : t.expand}</span>
-          <CaretDown className={cn("text-terminal-muted transition", open && "rotate-180")} size={16} weight="bold" />
-        </span>
-      </button>
-      {open ? (
-        <div ref={terminalRef} id="terminalLog" data-api-loader="loadLatestJob" className="max-h-80 min-h-64 overflow-y-auto px-4 py-3 font-mono text-[0.8rem] leading-relaxed">
+    <Disclosure isExpanded={open} onExpandedChange={(isExpanded) => isExpanded !== open && onToggle()} className="mt-5 overflow-hidden rounded-3xl border text-[var(--babel-terminal-ink)] shadow-overlay [background:var(--babel-terminal)] [border-color:var(--babel-terminal-line)]">
+      <Disclosure.Heading>
+        <Disclosure.Trigger className="flex w-full items-center justify-between border-b px-4 py-3 text-left [border-color:var(--babel-terminal-line)] hover:bg-[color-mix(in_oklab,var(--babel-terminal-line)_40%,transparent)]">
+          <span className="inline-flex items-center gap-2 font-mono text-xs font-bold uppercase tracking-[0.16em]">
+            <TerminalWindow size={17} weight="bold" />
+            {open ? t.terminalTitle : `${t.terminalCollapsed} · ${events.length} events`}
+          </span>
+          <span className="inline-flex items-center gap-3">
+            <span className={cn("status-light", status === "running" && "is-running")} aria-label={status || "idle"} />
+            <span className="font-mono text-xs text-[var(--babel-terminal-muted)]">{open ? t.collapse : t.expand}</span>
+            <Disclosure.Indicator><CaretDown size={16} weight="bold" /></Disclosure.Indicator>
+          </span>
+        </Disclosure.Trigger>
+      </Disclosure.Heading>
+      <Disclosure.Content>
+        <Disclosure.Body ref={terminalRef} id="terminalLog" data-api-loader="loadLatestJob" className="max-h-80 min-h-64 overflow-y-auto px-4 py-3 font-mono text-[0.8rem] leading-relaxed">
           {events.map((event, index) => (
             <div key={`${event.ts || "event"}-${index}`} className={cn("terminal-line", `event-${event.type}`)}>
-              <span className="mr-3 text-terminal-muted">{eventTime(event.ts)}</span>
-              <span className="mr-3 text-terminal-accent">{event.type}</span>
-              {event.batch ? <span className="mr-3 text-terminal-info">batch={event.batch.batch}</span> : null}
+              <span className="mr-3 text-[var(--babel-terminal-muted)]">{eventTime(event.ts)}</span>
+              <span className="mr-3 text-[var(--babel-terminal-accent)]">{event.type}</span>
+              {event.batch ? <span className="mr-3 text-[var(--babel-terminal-info)]">batch={event.batch.batch}</span> : null}
               <span>{event.message}</span>
             </div>
           ))}
           {status === "running" ? (
             <div className="terminal-line"><span className="terminal-cursor" /></div>
           ) : null}
-        </div>
-      ) : null}
-    </div>
+        </Disclosure.Body>
+      </Disclosure.Content>
+    </Disclosure>
   );
 }
 
@@ -1797,24 +1832,23 @@ function DownloadsPanel({ t, jobId, canDownloadOutput, canDownloadGlossary, onDo
         {downloads.map((download) => {
           const Icon = download.icon;
           return (
-            <a
+            <HeroButton
               key={download.path}
-              className={cn("flex items-center gap-3 rounded-xl border border-ink/12 bg-surface px-4 py-4 text-ink transition", download.enabled ? "hover:-translate-y-0.5 hover:border-clay/45" : "pointer-events-none opacity-55")}
-              href={download.enabled && jobId ? `/api/jobs/${jobId}/download/${download.path}` : undefined}
-              onClick={(event) => {
+              className="h-auto w-full justify-start px-4 py-4"
+              variant="ghost"
+              isDisabled={!download.enabled}
+              onPress={() => {
                 if (download.enabled && jobId) {
-                  event.preventDefault();
                   onDownload(`/api/jobs/${jobId}/download/${download.path}`);
                 }
               }}
-              aria-disabled={!download.enabled}
             >
-              <Icon size={24} className="text-clay" weight="duotone" />
+              <Icon size={24} className="text-accent" weight="duotone" />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-sm font-bold">{download.label}</span>
                 <span className="text-xs text-muted">{download.enabled ? "Ready" : t.unavailable}</span>
               </span>
-            </a>
+            </HeroButton>
           );
         })}
       </div>
@@ -1830,11 +1864,11 @@ function ValidationPanel({ t, job, tone }: { t: (typeof dictionaries)[Locale]; j
   const untranslatedRatio = job?.ai_qa_summary?.untranslated_ratio;
   const untranslatedRatioLabel = typeof untranslatedRatio === "number" ? `${(untranslatedRatio * 100).toFixed(1)}%` : "0.0%";
   return (
-    <div className="mt-6 border-t border-ink/12 pt-5">
+    <div className="mt-6 border-t border-border pt-5">
       <h3 className="mb-3 text-lg font-bold tracking-tight">{t.validation}</h3>
-      <div className="rounded-2xl border border-ink/12 bg-surface p-4">
+      <HeroCard variant="secondary">
         <div className="flex items-center gap-4">
-          <div className={cn("grid size-14 place-items-center rounded-full", tone === "failed" ? "bg-danger/10 text-danger" : "bg-success/10 text-success")}>
+          <div className={cn("grid size-14 place-items-center rounded-full", tone === "failed" ? "bg-danger-soft text-danger-soft-foreground" : "bg-success-soft text-success-soft-foreground")}>
             <Icon size={32} weight="bold" />
           </div>
           <div>
@@ -1842,7 +1876,7 @@ function ValidationPanel({ t, job, tone }: { t: (typeof dictionaries)[Locale]; j
             <p className="mt-1 text-sm leading-relaxed text-muted">{t.validationHint}</p>
           </div>
         </div>
-        <div className="mt-4 divide-y divide-ink/10 rounded-xl border border-ink/10">
+        <div className="mt-4 divide-y divide-separator rounded-2xl bg-default">
           <ValidationRow label={t.structuralValidation} value={tone === "completed" ? t.validationReady : tone === "failed" ? t.validationFailed : t.validationPending} tone={tone} />
           <ValidationRow label={t.aiQuality} value={job?.ai_qa_status || "pending"} tone={job?.ai_qa_status === "failed" ? "failed" : tone === "completed" ? "completed" : "idle"} />
           <ValidationRow label={t.fixedRows} value={String(fixed)} tone={fixed > 0 ? "completed" : "idle"} />
@@ -1857,8 +1891,49 @@ function ValidationPanel({ t, job, tone }: { t: (typeof dictionaries)[Locale]; j
           <ValidationRow label={t.punctuationDrift} value={String(job?.ai_qa_summary?.punctuation_quote_drift ?? 0)} tone={(job?.ai_qa_summary?.punctuation_quote_drift ?? 0) > 0 ? "idle" : "completed"} />
           <ValidationRow label={t.personNameDrift} value={String(job?.ai_qa_summary?.person_name_drift ?? 0)} tone={(job?.ai_qa_summary?.person_name_drift ?? 0) > 0 ? "idle" : "completed"} />
         </div>
-      </div>
+      </HeroCard>
     </div>
+  );
+}
+
+function StartWarningModal({
+  t,
+  stats,
+  onClose,
+  onConfirm,
+}: {
+  t: (typeof dictionaries)[Locale];
+  stats: ReturnType<typeof glossaryStats>;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <>
+      <AlertDialog.Backdrop isOpen onOpenChange={(isOpen) => !isOpen && onClose()} variant="blur">
+        <AlertDialog.Container size="md" className="w-full max-w-xl">
+          <AlertDialog.Dialog aria-labelledby="start-warning-title">
+            <AlertDialog.Header>
+              <AlertDialog.Icon status="warning"><WarningCircle size={22} weight="bold" /></AlertDialog.Icon>
+              <AlertDialog.Heading id="start-warning-title">{t.startPendingTitle}</AlertDialog.Heading>
+            </AlertDialog.Header>
+            <AlertDialog.Body>
+              <p className="mt-4 text-sm leading-relaxed text-muted">{t.startPendingBody}</p>
+              <div className="mt-4 grid grid-cols-2 gap-3">
+                <Metric label={t.pending} value={String(stats.pending)} />
+                <Metric label={t.emptyDrafts} value={String(stats.empty)} />
+              </div>
+            </AlertDialog.Body>
+            <AlertDialog.Footer className="mt-6 flex flex-col gap-3 border-t border-border pt-5 sm:flex-row sm:justify-end">
+              <Button type="button" variant="ghost" onClick={onClose}>{t.close}</Button>
+              <Button type="button" onClick={onConfirm}>
+                <Play size={18} weight="bold" />
+                {t.start}
+              </Button>
+            </AlertDialog.Footer>
+          </AlertDialog.Dialog>
+        </AlertDialog.Container>
+      </AlertDialog.Backdrop>
+    </>
   );
 }
 
@@ -1884,103 +1959,110 @@ function SettingsModal({
   onSave: () => void;
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
-  useModalBehavior(onClose, closeRef);
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-ink/45 px-4 py-6 backdrop-blur-sm" onMouseDown={onClose}>
-      <div role="dialog" aria-modal="true" aria-labelledby="settings-title" className="max-h-[88dvh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-ink/15 bg-paper p-5 shadow-modal" onMouseDown={(event) => event.stopPropagation()}>
-        <ModalHeader id="settings-title" title={t.settings} closeLabel={t.close} closeRef={closeRef} onClose={onClose} />
-        <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_260px]">
-          <div className="space-y-4">
-            <h3 className="text-lg font-bold">{t.providerTitle}</h3>
-            <Field label={t.provider}>
-              <Select value={provider.provider} onChange={(event) => onUpdateProvider("provider", event.target.value)}>
-                <option value="openai-compatible">{t.openProvider}</option>
-                <option value="openai-responses">OpenAI Responses</option>
-                <option value="anthropic">{t.anthropic}</option>
-                <option value="ollama">Ollama</option>
-                <option value="deepl">DeepL</option>
-                <option value="google-translate">Google Translate</option>
-                <option value="fake">{t.fake}</option>
-              </Select>
-            </Field>
-            <Field label={t.baseUrl}><Input value={provider.base_url} onChange={(event) => onUpdateProvider("base_url", event.target.value)} /></Field>
-            <Field label={t.apiKey} helper={hasSavedApiKey ? t.savedApiKey : undefined}>
-              <div className="relative">
-                <Input className="pr-10" type="password" autoComplete="off" value={provider.api_key} onChange={(event) => onUpdateProvider("api_key", event.target.value)} />
-                <LockKey size={18} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted" weight="bold" />
+    <>
+      <Modal.Backdrop isOpen onOpenChange={(isOpen) => !isOpen && onClose()} variant="blur">
+        <Modal.Container size="lg" scroll="inside" className="w-full max-w-3xl">
+          <Modal.Dialog aria-labelledby="settings-title" className="max-h-[88dvh] overflow-y-auto">
+            <ModalHeader id="settings-title" title={t.settings} closeLabel={t.close} closeRef={closeRef} onClose={onClose} />
+            <Modal.Body className="mt-5 grid gap-5 p-0 lg:grid-cols-[minmax(0,1fr)_260px]">
+              <div className="space-y-4">
+                <h3 className="text-lg font-bold">{t.providerTitle}</h3>
+                <Select label={t.provider} value={provider.provider} onChange={(event) => onUpdateProvider("provider", event.target.value)}>
+                    <option value="openai-compatible">{t.openProvider}</option>
+                    <option value="openai-responses">OpenAI Responses</option>
+                    <option value="anthropic">{t.anthropic}</option>
+                    <option value="ollama">Ollama</option>
+                    <option value="deepl">DeepL</option>
+                    <option value="google-translate">Google Translate</option>
+                    <option value="fake">{t.fake}</option>
+                </Select>
+                <Field label={t.baseUrl}><Input value={provider.base_url} onChange={(event) => onUpdateProvider("base_url", event.target.value)} /></Field>
+                <Field label={t.apiKey} helper={hasSavedApiKey ? t.savedApiKey : undefined}>
+                  <div className="relative">
+                    <Input className="pr-10" type="password" autoComplete="off" value={provider.api_key} onChange={(event) => onUpdateProvider("api_key", event.target.value)} />
+                    <LockKey size={18} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted" weight="bold" />
+                  </div>
+                </Field>
+                <Field label={t.model}><Input value={provider.model} onChange={(event) => onUpdateProvider("model", event.target.value)} /></Field>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <NumberInputField label={t.concurrency} minValue={1} step={1} value={provider.max_concurrency} onChange={(value) => onUpdateProvider("max_concurrency", value)} />
+                  <NumberInputField label={t.requestTimeout} minValue={1} step={1} value={provider.request_timeout} onChange={(value) => onUpdateProvider("request_timeout", value)} />
+                  <NumberInputField label={t.retries} minValue={0} step={1} value={provider.max_retries} onChange={(value) => onUpdateProvider("max_retries", value)} />
+                </div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <NumberInputField label={t.rpmLimit} minValue={0} step={1} value={provider.max_requests_per_minute} onChange={(value) => onUpdateProvider("max_requests_per_minute", value)} />
+                  <NumberInputField label={t.tpmLimit} minValue={0} step={1} value={provider.max_tokens_per_minute} onChange={(value) => onUpdateProvider("max_tokens_per_minute", value)} />
+                  <NumberInputField label={t.budgetLimit} minValue={0} step={0.000001} value={provider.budget_limit} onChange={(value) => onUpdateProvider("budget_limit", value)} />
+                </div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <NumberInputField label={t.inputTokenCost} minValue={0} step={0.000001} value={provider.input_cost_per_1m_tokens} onChange={(value) => onUpdateProvider("input_cost_per_1m_tokens", value)} />
+                  <NumberInputField label={t.outputTokenCost} minValue={0} step={0.000001} value={provider.output_cost_per_1m_tokens} onChange={(value) => onUpdateProvider("output_cost_per_1m_tokens", value)} />
+                </div>
               </div>
-            </Field>
-            <Field label={t.model}><Input value={provider.model} onChange={(event) => onUpdateProvider("model", event.target.value)} /></Field>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <Field label={t.concurrency}><Input type="number" min={1} step={1} value={provider.max_concurrency} onChange={(event) => onUpdateProvider("max_concurrency", event.target.value)} /></Field>
-              <Field label={t.requestTimeout}><Input type="number" min={1} step={1} value={provider.request_timeout} onChange={(event) => onUpdateProvider("request_timeout", event.target.value)} /></Field>
-              <Field label={t.retries}><Input type="number" min={0} step={1} value={provider.max_retries} onChange={(event) => onUpdateProvider("max_retries", event.target.value)} /></Field>
-            </div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <Field label={t.rpmLimit}><Input type="number" min={0} step={1} value={provider.max_requests_per_minute} onChange={(event) => onUpdateProvider("max_requests_per_minute", event.target.value)} /></Field>
-              <Field label={t.tpmLimit}><Input type="number" min={0} step={1} value={provider.max_tokens_per_minute} onChange={(event) => onUpdateProvider("max_tokens_per_minute", event.target.value)} /></Field>
-              <Field label={t.budgetLimit}><Input type="number" min={0} step="0.000001" value={provider.budget_limit} onChange={(event) => onUpdateProvider("budget_limit", event.target.value)} /></Field>
-            </div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Field label={t.inputTokenCost}><Input type="number" min={0} step="0.000001" value={provider.input_cost_per_1m_tokens} onChange={(event) => onUpdateProvider("input_cost_per_1m_tokens", event.target.value)} /></Field>
-              <Field label={t.outputTokenCost}><Input type="number" min={0} step="0.000001" value={provider.output_cost_per_1m_tokens} onChange={(event) => onUpdateProvider("output_cost_per_1m_tokens", event.target.value)} /></Field>
-            </div>
-          </div>
-          <div className="space-y-4 rounded-2xl border border-ink/12 bg-surface p-4">
-            <h3 className="text-lg font-bold">{t.qualityAutomation}</h3>
-            <SwitchRow label={t.structuredOutputToggle} helper={t.structuredOutputHelp} checked={provider.structured_output_enabled} onChange={(checked) => onUpdateProvider("structured_output_enabled", checked)} />
-            <SwitchRow label={t.memoryToggle} helper={t.memoryHelp} checked={provider.memory_enabled} onChange={(checked) => onUpdateProvider("memory_enabled", checked)} />
-            <Field label={t.memoryProject} helper={t.memoryProjectHelp}>
-              <Input value={provider.memory_project_id} onChange={(event) => onUpdateProvider("memory_project_id", event.target.value)} placeholder="default" />
-            </Field>
-            <SwitchRow label={t.aiQaToggle} helper={t.aiQaHelp} checked={provider.ai_qa_enabled} onChange={(checked) => onUpdateProvider("ai_qa_enabled", checked)} />
-            <SwitchRow label={t.autoTitleToggle} helper={t.autoTitleHelp} checked={provider.auto_title_enabled && canUseProvider} disabled={!canUseProvider} onChange={(checked) => onUpdateProvider("auto_title_enabled", checked)} />
-            <div className="rounded-xl border border-ink/10 bg-paper/70 p-3 text-sm">
-              <div className="font-mono text-xs uppercase tracking-[0.14em] text-muted">{t.version}</div>
-              <div className="mt-1 font-bold">v{meta.version}</div>
-            </div>
-            <a className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-ink/15 bg-paper px-4 py-3 text-sm font-bold transition hover:border-clay/45" href={meta.github_url} target="_blank" rel="noreferrer">
-              <GithubLogo size={18} weight="bold" />
-              {t.github}
-            </a>
-          </div>
-        </div>
-        <div className="mt-6 flex flex-col gap-3 border-t border-ink/12 pt-5 sm:flex-row sm:justify-end">
-          <Button type="button" variant="ghost" onClick={onClose}>{t.close}</Button>
-          <Button type="button" onClick={onSave} disabled={isSaving}>
-            <FloppyDisk size={18} weight="bold" />
-            {isSaving ? `${t.saveSettings}...` : t.saveSettings}
-          </Button>
-        </div>
-      </div>
-    </div>
+              <HeroCard variant="secondary" className="space-y-4">
+                <h3 className="text-lg font-bold">{t.qualityAutomation}</h3>
+                <SwitchRow label={t.structuredOutputToggle} helper={t.structuredOutputHelp} checked={provider.structured_output_enabled} onChange={(checked) => onUpdateProvider("structured_output_enabled", checked)} />
+                <SwitchRow label={t.memoryToggle} helper={t.memoryHelp} checked={provider.memory_enabled} onChange={(checked) => onUpdateProvider("memory_enabled", checked)} />
+                <Field label={t.memoryProject} helper={t.memoryProjectHelp}>
+                  <Input value={provider.memory_project_id} onChange={(event) => onUpdateProvider("memory_project_id", event.target.value)} placeholder="default" />
+                </Field>
+                <SwitchRow label={t.aiQaToggle} helper={t.aiQaHelp} checked={provider.ai_qa_enabled} onChange={(checked) => onUpdateProvider("ai_qa_enabled", checked)} />
+                <SwitchRow label={t.autoTitleToggle} helper={t.autoTitleHelp} checked={provider.auto_title_enabled && canUseProvider} disabled={!canUseProvider} onChange={(checked) => onUpdateProvider("auto_title_enabled", checked)} />
+                <div className="rounded-2xl bg-default p-3 text-sm">
+                  <div className="font-mono text-xs uppercase tracking-[0.14em] text-muted">{t.version}</div>
+                  <div className="mt-1 font-bold">v{meta.version}</div>
+                </div>
+                <HeroLink className="w-full justify-center" href={meta.github_url} target="_blank" rel="noreferrer">
+                  <GithubLogo size={18} weight="bold" />
+                  {t.github}
+                  <HeroLink.Icon />
+                </HeroLink>
+              </HeroCard>
+            </Modal.Body>
+            <Modal.Footer className="mt-6 flex flex-col gap-3 border-t border-border p-0 pt-5 sm:flex-row sm:justify-end">
+              <Button type="button" variant="ghost" onClick={onClose}>{t.close}</Button>
+              <Button type="button" onClick={onSave} disabled={isSaving}>
+                <FloppyDisk size={18} weight="bold" />
+                {isSaving ? `${t.saveSettings}...` : t.saveSettings}
+              </Button>
+            </Modal.Footer>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+    </>
   );
 }
 
 function GuideModal({ t, onClose, onStartWithUpload, onViewCurrentJob }: { t: (typeof dictionaries)[Locale]; onClose: () => void; onStartWithUpload: () => void; onViewCurrentJob: () => void }) {
   const closeRef = useRef<HTMLButtonElement>(null);
-  useModalBehavior(onClose, closeRef);
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-ink/45 px-4 py-6 backdrop-blur-sm" onMouseDown={onClose}>
-      <div role="dialog" aria-modal="true" aria-labelledby="guide-title" className="max-h-[88dvh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-ink/15 bg-paper p-5 shadow-modal" onMouseDown={(event) => event.stopPropagation()}>
-        <ModalHeader id="guide-title" title={t.guideTitle} subtitle={t.guideIntro} closeLabel={t.close} closeRef={closeRef} onClose={onClose} />
-        <ol className="mt-6 grid gap-3">
-          {t.guideSteps.map(([title, body], index) => (
-            <li key={title} className="grid grid-cols-[42px_minmax(0,1fr)] gap-3 rounded-xl border border-ink/12 bg-surface/80 p-4">
-              <div className="grid size-10 place-items-center rounded-full bg-ink font-mono text-sm font-bold text-paper">{index + 1}</div>
-              <div>
-                <div className="font-bold">{title}</div>
-                <p className="mt-1 text-sm leading-relaxed text-muted">{body}</p>
-              </div>
-            </li>
-          ))}
-        </ol>
-        <div className="mt-6 flex flex-col gap-3 border-t border-ink/12 pt-5 sm:flex-row sm:justify-end">
-          <Button type="button" variant="secondary" onClick={onStartWithUpload}><FileArrowUp size={18} weight="bold" />{t.startWithUpload}</Button>
-          <Button type="button" onClick={onViewCurrentJob}><TerminalWindow size={18} weight="bold" />{t.viewCurrentJob}</Button>
-        </div>
-      </div>
-    </div>
+    <>
+      <Modal.Backdrop isOpen onOpenChange={(isOpen) => !isOpen && onClose()} variant="blur">
+        <Modal.Container size="lg" scroll="inside" className="w-full max-w-2xl">
+          <Modal.Dialog aria-labelledby="guide-title" className="max-h-[88dvh] overflow-y-auto">
+            <ModalHeader id="guide-title" title={t.guideTitle} subtitle={t.guideIntro} closeLabel={t.close} closeRef={closeRef} onClose={onClose} />
+            <Modal.Body className="p-0">
+              <ol className="mt-6 grid gap-3">
+                {t.guideSteps.map(([title, body], index) => (
+                  <li key={title} className="grid grid-cols-[42px_minmax(0,1fr)] gap-3 rounded-3xl bg-surface-secondary p-4">
+                    <div className="grid size-10 place-items-center rounded-full bg-accent font-mono text-sm font-bold text-accent-foreground">{index + 1}</div>
+                    <div>
+                      <div className="font-bold">{title}</div>
+                      <p className="mt-1 text-sm leading-relaxed text-muted">{body}</p>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            </Modal.Body>
+            <Modal.Footer className="mt-6 flex flex-col gap-3 border-t border-border p-0 pt-5 sm:flex-row sm:justify-end">
+              <Button type="button" variant="secondary" onClick={onStartWithUpload}><FileArrowUp size={18} weight="bold" />{t.startWithUpload}</Button>
+              <Button type="button" onClick={onViewCurrentJob}><TerminalWindow size={18} weight="bold" />{t.viewCurrentJob}</Button>
+            </Modal.Footer>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+    </>
   );
 }
 
@@ -1988,11 +2070,6 @@ function AuthModal({ t, onUnlock }: { t: (typeof dictionaries)[Locale]; onUnlock
   const [token, setToken] = useState("");
   const [invalid, setInvalid] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2003,72 +2080,67 @@ function AuthModal({ t, onUnlock }: { t: (typeof dictionaries)[Locale]; onUnlock
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/55 px-4 py-6 backdrop-blur-sm">
-      <form role="dialog" aria-modal="true" aria-labelledby="auth-title" className="w-full max-w-md rounded-2xl border border-ink/15 bg-paper p-5 shadow-modal" onSubmit={submit}>
-        <div className="flex items-start gap-3">
-          <div className="grid size-11 shrink-0 place-items-center rounded-xl bg-ink text-paper"><LockKey size={22} weight="bold" /></div>
-          <div>
-            <h2 id="auth-title" className="text-2xl font-black tracking-tight">{t.unlockTitle}</h2>
-            <p className="mt-1 text-sm leading-relaxed text-muted">{t.unlockHelp}</p>
-          </div>
-        </div>
-        <Field label={t.accessToken}>
-          <input ref={inputRef} className="mt-5 w-full rounded-xl border border-ink/14 bg-surface px-3 py-2.5 text-sm text-ink outline-none transition focus:border-clay focus:ring-2 focus:ring-clay/20" type="password" autoComplete="current-password" value={token} onChange={(event) => { setToken(event.target.value); setInvalid(false); }} />
-        </Field>
-        {invalid ? <p className="mt-3 text-sm text-danger">{t.invalidToken}</p> : null}
-        <Button className="mt-5 w-full" type="submit" disabled={!token.trim() || submitting}>
-          <LockKey size={18} weight="bold" />
-          {submitting ? `${t.unlock}...` : t.unlock}
-        </Button>
-      </form>
-    </div>
+    <>
+      <Modal.Backdrop isOpen isDismissable={false} variant="blur">
+        <Modal.Container size="sm">
+          <Modal.Dialog aria-labelledby="auth-title">
+            <Form onSubmit={submit}>
+              <Modal.Header className="flex items-start gap-3 p-0">
+                <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent text-accent-foreground"><LockKey size={22} weight="bold" /></div>
+                <div>
+                  <Modal.Heading id="auth-title" className="text-2xl font-black tracking-tight">{t.unlockTitle}</Modal.Heading>
+                  <p className="mt-1 text-sm leading-relaxed text-muted">{t.unlockHelp}</p>
+                </div>
+              </Modal.Header>
+              <Modal.Body className="p-0 pt-5">
+                <TextField fullWidth isInvalid={invalid}>
+                  <Label className="mb-2 block font-mono text-[0.68rem] font-bold uppercase tracking-[0.13em] text-muted">{t.accessToken}</Label>
+                  <HeroInput autoFocus fullWidth variant="primary" type="password" autoComplete="current-password" value={token} onChange={(event) => { setToken(event.target.value); setInvalid(false); }} />
+                  {invalid ? <FieldError>{t.invalidToken}</FieldError> : null}
+                </TextField>
+              </Modal.Body>
+              <Modal.Footer className="p-0 pt-5">
+                <Button className="w-full" type="submit" disabled={!token.trim() || submitting}>
+                  <LockKey size={18} weight="bold" />
+                  {submitting ? `${t.unlock}...` : t.unlock}
+                </Button>
+              </Modal.Footer>
+            </Form>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+    </>
   );
 }
 
 function ModalHeader({ id, title, subtitle, closeLabel, closeRef, onClose }: { id: string; title: string; subtitle?: string; closeLabel: string; closeRef: React.RefObject<HTMLButtonElement | null>; onClose: () => void }) {
   return (
-    <div className="flex items-start justify-between gap-4">
+    <Modal.Header className="flex items-start justify-between gap-4 p-0">
       <div>
-        <h2 id={id} className="text-2xl font-black tracking-tight">{title}</h2>
+        <Modal.Heading id={id} className="text-2xl font-black tracking-tight">{title}</Modal.Heading>
         {subtitle ? <p className="mt-2 max-w-[58ch] text-sm leading-relaxed text-muted">{subtitle}</p> : null}
       </div>
-      <button ref={closeRef} type="button" className="grid size-10 shrink-0 place-items-center rounded-xl border border-ink/15 bg-surface text-ink transition hover:-translate-y-0.5 hover:border-clay/45 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-clay" onClick={onClose} aria-label={closeLabel}>
+      <Modal.CloseTrigger ref={closeRef} onPress={onClose} aria-label={closeLabel}>
         <X size={18} weight="bold" />
-      </button>
-    </div>
+      </Modal.CloseTrigger>
+    </Modal.Header>
   );
-}
-
-function useModalBehavior(onClose: () => void, focusRef: React.RefObject<HTMLElement | null>) {
-  useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    window.setTimeout(() => focusRef.current?.focus(), 0);
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [focusRef, onClose]);
 }
 
 function SwitchRow({ label, helper, checked, disabled, onChange }: { label: string; helper: string; checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void }) {
   return (
-    <label className={cn("block rounded-xl border border-ink/10 bg-paper/70 p-3", disabled && "opacity-55")}>
+    <HeroSwitch
+      className={cn("block rounded-3xl bg-default p-3", disabled && "opacity-55")}
+      isDisabled={disabled}
+      isSelected={checked}
+      onChange={onChange}
+    >
       <span className="flex items-center justify-between gap-3">
-        <span className="font-bold">{label}</span>
-        <input className="peer sr-only" type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
-        <span className={cn("relative h-7 w-12 rounded-full border border-ink/15 transition", checked ? "bg-clay" : "bg-line")}>
-          <span className={cn("absolute left-1 top-1 size-5 rounded-full bg-surface shadow transition", checked && "translate-x-5")} />
-        </span>
+        <HeroSwitch.Content className="font-bold">{label}</HeroSwitch.Content>
+        <HeroSwitch.Control />
       </span>
       <span className="mt-2 block text-xs leading-relaxed text-muted">{helper}</span>
-    </label>
+    </HeroSwitch>
   );
 }
 
@@ -2083,35 +2155,42 @@ function ValidationRow({ label, value, tone }: { label: string; value: string; t
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 rounded-xl border border-ink/10 bg-paper/70 px-3 py-3">
-      <div className="font-mono text-[0.66rem] uppercase tracking-[0.14em] text-muted">{label}</div>
-      <div className="mt-1 break-words text-sm font-bold leading-snug text-ink">{value}</div>
-    </div>
+    <HeroCard variant="secondary" className="min-w-0">
+      <HeroCard.Content>
+        <div className="font-mono text-[0.66rem] uppercase tracking-[0.14em] text-muted">{label}</div>
+        <div className="mt-1 break-words text-sm font-bold leading-snug text-foreground">{value}</div>
+      </HeroCard.Content>
+    </HeroCard>
   );
 }
 
 function StatusPill({ status, tone }: { status: string; tone: Tone }) {
+  const color = tone === "completed" ? "success" : tone === "failed" ? "danger" : tone === "idle" ? "default" : "accent";
   return (
-    <span className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1 font-mono text-xs font-bold uppercase tracking-[0.12em]", tone === "running" && "border-info/35 bg-info/10 text-info", tone === "failed" && "border-danger/35 bg-danger/10 text-danger", tone === "completed" && "border-success/35 bg-success/10 text-success", tone === "prepared" && "border-clay/35 bg-clay/10 text-clay", tone === "idle" && "border-ink/15 bg-surface text-muted")}>
-      <span className={cn("size-2 rounded-full", tone === "running" ? "animate-pulse bg-info" : "bg-current")} />
+    <Chip color={color} size="sm" variant="soft" className="font-mono uppercase tracking-[0.12em]">
+      <span className={cn("size-2 rounded-full bg-current", tone === "running" && "animate-pulse")} />
       {status}
-    </span>
+    </Chip>
   );
 }
 
 function NoticeBar({ notice }: { notice: NonNullable<Notice> }) {
+  const status = notice.kind === "error" ? "danger" : notice.kind === "success" ? "success" : "accent";
   return (
-    <div className={cn("mt-4 rounded-xl border px-3 py-2 text-sm", notice.kind === "error" && "border-danger/35 bg-danger/8 text-danger", notice.kind === "success" && "border-success/35 bg-success/8 text-success", notice.kind === "info" && "border-info/30 bg-info/8 text-info")}>
-      {notice.text}
-    </div>
+    <Alert status={status} className="mt-4">
+      <Alert.Indicator />
+      <Alert.Content>
+        <Alert.Description>{notice.text}</Alert.Description>
+      </Alert.Content>
+    </Alert>
   );
 }
 
 function EstimatePanel({ title, label, value }: { title: string; label: string; value: string }) {
   return (
-    <div className="mt-4 flex flex-col gap-1 rounded-xl border border-ink/10 bg-paper/70 px-3 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+    <div className="mt-4 flex flex-col gap-1 rounded-2xl bg-default px-3 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
       <span className="font-mono text-[0.66rem] font-bold uppercase tracking-[0.14em] text-muted">{title}</span>
-      <span className="font-semibold text-ink">
+      <span className="font-semibold text-foreground">
         {label}: {value}
       </span>
     </div>
@@ -2130,7 +2209,7 @@ function UsagePanel({ t, usage }: { t: (typeof dictionaries)[Locale]; usage?: Ba
   const budgetLimit = usage?.budget_limit || 0;
   const hasUsage = totalTokens || estimatedTokens || estimatedCost || actualCost || budgetLimit;
   return (
-    <div className="mt-4 rounded-2xl border border-ink/10 bg-paper/70 p-3">
+    <HeroCard variant="secondary" className="mt-4">
       <div className="font-mono text-[0.66rem] font-bold uppercase tracking-[0.14em] text-muted">{t.usageTitle}</div>
       {hasUsage ? (
         <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -2149,44 +2228,111 @@ function UsagePanel({ t, usage }: { t: (typeof dictionaries)[Locale]; usage?: Ba
           {requests ? ` ${t.providerCalls}: ${formatNumber(requests)}` : ""}
         </div>
       )}
-    </div>
+    </HeroCard>
   );
 }
 
 function Field({ label, helper, children }: { label: string; helper?: string; children: React.ReactNode }) {
   return (
-    <label className="block">
-      <span className="mb-2 block font-mono text-[0.68rem] font-bold uppercase tracking-[0.13em] text-muted">{label}</span>
+    <TextField fullWidth className="block">
+      <Label className="mb-2 block font-mono text-[0.68rem] font-bold uppercase tracking-[0.13em] text-muted">{label}</Label>
       {children}
-      {helper ? <span className="mt-2 block text-xs leading-relaxed text-muted">{helper}</span> : null}
-    </label>
+      {helper ? <Description className="mt-2 block text-xs leading-relaxed text-muted">{helper}</Description> : null}
+    </TextField>
+  );
+}
+
+function NumberInputField({ label, helper, name, minValue, step, value, onChange }: { label: string; helper?: string; name?: string; minValue?: number; step?: number; value: string; onChange: (value: string) => void }) {
+  const numericValue = value.trim() === "" ? undefined : Number(value);
+  return (
+    <NumberField fullWidth name={name} minValue={minValue} step={step} value={numericValue} onChange={(nextValue) => onChange(Number.isNaN(nextValue) ? "" : String(nextValue))}>
+      <Label className="mb-2 block font-mono text-[0.68rem] font-bold uppercase tracking-[0.13em] text-muted">{label}</Label>
+      <NumberField.Group>
+        <NumberField.Input />
+        <NumberField.DecrementButton aria-label={`Decrease ${label}`}>−</NumberField.DecrementButton>
+        <NumberField.IncrementButton aria-label={`Increase ${label}`}>+</NumberField.IncrementButton>
+      </NumberField.Group>
+      {helper ? <Description className="mt-2 block text-xs leading-relaxed text-muted">{helper}</Description> : null}
+    </NumberField>
   );
 }
 
 function Input({ className, ...props }: React.InputHTMLAttributes<HTMLInputElement>) {
-  return <input className={cn("w-full rounded-xl border border-ink/14 bg-surface px-3 py-2.5 text-sm text-ink outline-none transition placeholder:text-muted focus:border-clay focus:ring-2 focus:ring-clay/20", className)} {...props} />;
+  return <HeroInput fullWidth variant="primary" className={className} {...(props as React.ComponentProps<typeof HeroInput>)} />;
 }
 
-function TableInput({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  return <input className="w-full min-w-24 rounded-lg border border-transparent bg-transparent px-2 py-1.5 text-sm text-ink outline-none transition hover:border-ink/12 hover:bg-surface focus:border-clay focus:bg-surface focus:ring-2 focus:ring-clay/20" value={value} onChange={(event) => onChange(event.target.value)} />;
+function TableInput({ ariaLabel, value, onChange }: { ariaLabel: string; value: string; onChange: (value: string) => void }) {
+  return <HeroInput aria-label={ariaLabel} fullWidth variant="secondary" className="min-w-24" value={value} onChange={(event) => onChange(event.target.value)} />;
 }
 
-function Select({ className, children, ...props }: React.SelectHTMLAttributes<HTMLSelectElement>) {
+function Select({ className, children, label, helper, ...props }: React.SelectHTMLAttributes<HTMLSelectElement> & { label?: string; helper?: string }) {
+  const options = React.Children.toArray(children)
+    .filter(React.isValidElement)
+    .map((child) => {
+      const option = child as React.ReactElement<React.OptionHTMLAttributes<HTMLOptionElement>>;
+      return {
+        value: String(option.props.value ?? option.props.children ?? ""),
+        label: option.props.children,
+        disabled: option.props.disabled,
+      };
+    });
+  const selectedKey = props.value === undefined ? undefined : String(props.value);
   return (
-    <div className="relative">
-      <select className={cn("w-full appearance-none rounded-xl border border-ink/14 bg-surface px-3 py-2.5 pr-10 text-sm text-ink outline-none transition focus:border-clay focus:ring-2 focus:ring-clay/20", className)} {...props}>
-        {children}
-      </select>
-      <CaretDown size={17} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted" weight="bold" />
-    </div>
+    <HeroSelect
+      className={cn("w-full", className)}
+      fullWidth
+      aria-label={props["aria-label"]}
+      name={props.name}
+      isRequired={props.required}
+      isDisabled={props.disabled}
+      variant="primary"
+      selectedKey={selectedKey}
+      onSelectionChange={(key) => {
+        if (key === null) {
+          return;
+        }
+        props.onChange?.({ target: { value: String(key) } } as React.ChangeEvent<HTMLSelectElement>);
+      }}
+    >
+      {label ? <Label className="mb-2 block font-mono text-[0.68rem] font-bold uppercase tracking-[0.13em] text-muted">{label}</Label> : null}
+      <HeroSelect.Trigger>
+        <HeroSelect.Value />
+        <HeroSelect.Indicator>
+          <CaretDown size={17} weight="bold" />
+        </HeroSelect.Indicator>
+      </HeroSelect.Trigger>
+      <HeroSelect.Popover>
+        <ListBox>
+          {options.map((option) => (
+            <ListBox.Item
+              key={option.value}
+              id={option.value}
+              isDisabled={option.disabled}
+            >
+              {option.label}
+              <ListBox.ItemIndicator>
+                <CheckCircle size={16} weight="bold" />
+              </ListBox.ItemIndicator>
+            </ListBox.Item>
+          ))}
+        </ListBox>
+      </HeroSelect.Popover>
+      {helper ? <Description className="mt-2 block text-xs leading-relaxed text-muted">{helper}</Description> : null}
+    </HeroSelect>
   );
 }
 
-function Button({ variant = "primary", className, children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "ghost" }) {
+function Button({ variant = "primary", className, children, disabled, onClick, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "ghost" }) {
   return (
-    <button className={cn("inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition duration-200 active:translate-y-px disabled:pointer-events-none disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-clay", variant === "primary" && "bg-ink text-paper shadow-action hover:-translate-y-0.5 hover:bg-ink-soft", variant === "secondary" && "border border-clay/45 bg-clay text-paper shadow-action hover:-translate-y-0.5 hover:bg-clay-dark", variant === "ghost" && "border border-ink/15 bg-surface/70 text-ink hover:-translate-y-0.5 hover:bg-surface", className)} {...props}>
+    <HeroButton
+      className={className}
+      isDisabled={disabled}
+      onPress={(event) => onClick?.(event as unknown as React.MouseEvent<HTMLButtonElement>)}
+      variant={variant}
+      {...(props as Omit<React.ComponentProps<typeof HeroButton>, "className" | "children" | "isDisabled" | "onPress">)}
+    >
       {children}
-    </button>
+    </HeroButton>
   );
 }
 

@@ -7,7 +7,6 @@ import json
 import mimetypes
 import os
 import re
-from importlib import metadata
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -692,10 +691,7 @@ def _content_type_for_download(path: Path) -> str:
 
 
 def _package_version() -> str:
-    try:
-        return metadata.version("babel-epub")
-    except metadata.PackageNotFoundError:
-        return __version__
+    return __version__
 
 
 def run_server(host: str = "127.0.0.1", port: int = 7860, data_dir: Path | None = None) -> None:

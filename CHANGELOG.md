@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1 - 2026-07-11
+
+### Changed
+
+- Migrated the Web workbench to HeroUI v3 native buttons, cards, fields, selects, switches, alerts, dialogs, tables, pagination, disclosures, links, chips, and progress indicators.
+- Replaced browser-native translation warnings with an accessible HeroUI alert dialog and aligned component styling with HeroUI semantic tokens and variants.
+- Improved glossary review accessibility with labeled editable cells, a row header, native search and pagination, and responsive full-width desktop presentation.
+
 ## 0.8.0 - 2026-07-11
 
 ### Added
