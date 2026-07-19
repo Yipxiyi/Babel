@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -11,7 +13,10 @@ from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Callable
+from xml.etree import ElementTree as ET
 
+from .adaptive import adaptive_batch_char_limit, resolve_execution_plan
+from .diagnostics import diagnose_error
 from .glossary import (
     detect_deterministic_quality,
     detect_glossary_issues,
@@ -31,6 +36,9 @@ from .pipeline import (
     command_prepare,
     command_report,
     command_validate_batches,
+    element_text,
+    element_to_snippet,
+    parse_snippet,
     read_jsonl,
     validate_translation_rows,
     write_jsonl,
@@ -45,6 +53,7 @@ from .providers import (
     estimate_rows_tokens,
     TranslationProvider,
     is_retryable_translation_error,
+    is_retryable_translation_output_error,
     make_provider,
     normalize_max_concurrency,
     normalize_max_retries,
@@ -58,6 +67,26 @@ ProviderFactory = Callable[[ProviderSettings], TranslationProvider]
 MAX_EVENTS = 500
 DEFAULT_MAX_BLOCKS = 20
 GLOSSARY_AUTOFILL_BATCH_SIZE = 40
+
+
+def split_text_chunks(text: str, char_limit: int) -> list[str]:
+    """Split prose near sentence/word boundaries without dropping source text."""
+    target = max(500, int(char_limit) - 256)
+    remaining = text.strip()
+    chunks: list[str] = []
+    while len(remaining) > target:
+        window = remaining[: target + 1]
+        candidates = [match.end() for match in re.finditer(r"[。！？.!?；;]\s*|\s+", window)]
+        cut = max((position for position in candidates if position >= target // 2), default=target)
+        chunk = remaining[:cut].strip()
+        if not chunk:
+            chunk = remaining[:target]
+            cut = target
+        chunks.append(chunk)
+        remaining = remaining[cut:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
 
 
 def utc_now() -> str:
@@ -110,7 +139,7 @@ def default_events(data: dict, failed_batch: dict | None) -> list[dict]:
 @dataclass(frozen=True)
 class JobRequest:
     filename: str
-    content: bytes
+    content: bytes = b""
     target_language: str = "Simplified Chinese"
     title: str = ""
     language: str = "zh-CN"
@@ -119,6 +148,7 @@ class JobRequest:
     max_chars: int | None = None
     max_tokens: int | None = None
     glossary_preset: str = ""
+    adaptive_enabled: bool = True
 
 
 @dataclass
@@ -161,6 +191,9 @@ class BabelJob:
     generated_title: str = ""
     title_source: str = "manual"
     glossary_preset: str = ""
+    adaptive_enabled: bool = True
+    adaptive_plan: dict = field(default_factory=dict)
+    diagnostics: list[dict] = field(default_factory=list)
 
     def to_dict(self, include_paths: bool = True) -> dict:
         data = asdict(self)
@@ -200,6 +233,7 @@ class BabelJobEngine:
         self.provider_factory = provider_factory
         self._jobs: dict[str, BabelJob] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._start_locks: dict[str, threading.Lock] = {}
         self._rate_limiters: dict[str, RateLimitState] = {}
         self._memory_stores: dict[Path, TranslationMemoryStore] = {}
         self._budget_locks: dict[str, threading.Lock] = {}
@@ -212,7 +246,7 @@ class BabelJobEngine:
             try:
                 data = json.loads(state_path.read_text(encoding="utf-8"))
                 job = self._job_from_dict(data)
-                if job.status == "running":
+                if job.status in {"running", "preparing"}:
                     job.status = "failed"
                     job.active_batches = []
                     job.current_batch = None
@@ -274,6 +308,9 @@ class BabelJobEngine:
             generated_title=data.get("generated_title", ""),
             title_source=data.get("title_source", "manual"),
             glossary_preset=data.get("glossary_preset", ""),
+            adaptive_enabled=bool(data.get("adaptive_enabled", True)),
+            adaptive_plan=dict(data.get("adaptive_plan") or {}),
+            diagnostics=list(data.get("diagnostics") or []),
         )
 
     def _save_job(self, job: BabelJob) -> None:
@@ -580,6 +617,15 @@ class BabelJobEngine:
             if job.failed_batch is None:
                 job.failed_batch = summary
             job.errors.append(str(error))
+            job.diagnostics.append(
+                diagnose_error(
+                    error,
+                    stage="translate",
+                    filename=job.filename,
+                    input_format=job.input_format,
+                    batch=summary,
+                )
+            )
             job.message = f"Batch {batch['batch']} failed; continuing remaining batches."
             self._append_event(job, "batch-failed", f"Batch {batch['batch']} failed: {error}", batch=batch)
 
@@ -602,7 +648,7 @@ class BabelJobEngine:
                 valid.add(int(batch["batch"]))
         return valid
 
-    def create_job(self, request: JobRequest) -> BabelJob:
+    def _reserve_job(self, request: JobRequest) -> tuple[BabelJob, Path]:
         job_id = uuid.uuid4().hex[:12]
         work_dir = self.data_dir / job_id
         output_format = normalize_extension(request.output_format, ".epub")
@@ -614,32 +660,12 @@ class BabelJobEngine:
         input_book = work_dir / f"upload{extension}"
         glossary_path = work_dir / "translation_glossary.md"
         work_dir.mkdir(parents=True, exist_ok=True)
-        input_book.write_bytes(request.content)
-
-        command_prepare(
-            Namespace(
-                input_book=input_book,
-                input_epub=None,
-                work_dir=work_dir,
-                glossary=glossary_path,
-                target_language=request.target_language,
-                max_blocks=request.max_blocks,
-                max_chars=request.max_chars,
-                max_tokens=request.max_tokens,
-                glossary_preset=request.glossary_preset,
-                force=True,
-            )
-        )
-        manifest = json.loads((work_dir / "pipeline" / "batch_manifest.json").read_text(encoding="utf-8"))
-        input_metadata = json.loads((work_dir / "pipeline" / "input_format.json").read_text(encoding="utf-8"))
-        blocks = read_jsonl(work_dir / "pipeline" / "blocks.jsonl")
-        terms = read_glossary_terms(work_dir)
         title = request.title or default_output_title(request.filename, request.target_language)
         job = BabelJob(
             job_id=job_id,
-            status="prepared",
+            status="preparing",
             filename=request.filename,
-            input_format=input_metadata.get("input_format", extension),
+            input_format=extension,
             target_language=request.target_language,
             title=title,
             language=request.language,
@@ -647,15 +673,98 @@ class BabelJobEngine:
             work_dir=work_dir,
             input_epub=work_dir / "input.epub",
             glossary_path=glossary_path,
-            total_batches=len(manifest),
-            block_count=len(blocks),
-            message="Prepared. Review glossary, then start translation.",
-            glossary_summary=glossary_summary(terms),
+            message="Analyzing the source file and choosing safe translation settings.",
             title_source="manual" if request.title else "suffix",
             glossary_preset=request.glossary_preset,
+            adaptive_enabled=request.adaptive_enabled,
         )
-        self._append_event(job, "prepared", f"Prepared {len(manifest)} batches from {len(blocks)} blocks.")
-        return self._set_job(job)
+        self._append_event(job, "preparing", job.message)
+        return self._set_job(job), input_book
+
+    def _prepare_reserved_job(
+        self,
+        job_id: str,
+        request: JobRequest,
+        input_book: Path,
+        *,
+        raise_on_error: bool = False,
+    ) -> BabelJob:
+        job = self.get_job(job_id)
+        try:
+            result = command_prepare(
+                Namespace(
+                    input_book=input_book,
+                    input_epub=None,
+                    work_dir=job.work_dir,
+                    glossary=job.glossary_path,
+                    target_language=request.target_language,
+                    max_blocks=request.max_blocks,
+                    max_chars=request.max_chars,
+                    max_tokens=request.max_tokens,
+                    glossary_preset=request.glossary_preset,
+                    adaptive_enabled=request.adaptive_enabled,
+                    source_filename=request.filename,
+                    force=True,
+                )
+            )
+            input_metadata = result["input_metadata"]
+            blocks = result["blocks"]
+            manifest = result["batches"]
+            plan = result["adaptive_plan"]
+            if not blocks:
+                raise RuntimeError("No translatable text blocks were detected in the source file.")
+            terms = read_glossary_terms(job.work_dir)
+
+            def prepared(current: BabelJob) -> None:
+                current.status = "prepared"
+                current.input_format = input_metadata.get("input_format", current.input_format)
+                current.total_batches = len(manifest)
+                current.block_count = len(blocks)
+                current.adaptive_plan = plan
+                current.glossary_summary = glossary_summary(terms)
+                current.message = "Prepared. Review the glossary, then start translation."
+                self._append_event(
+                    current,
+                    "prepared",
+                    f"Prepared {len(manifest)} batches from {len(blocks)} blocks with "
+                    f"{'adaptive' if current.adaptive_enabled else 'custom'} settings.",
+                )
+
+            return self._mutate_job(job_id, prepared)
+        except Exception as exc:
+            failed = self._mark_job_failed(job_id, exc, stage="prepare")
+            if raise_on_error:
+                raise
+            return failed
+
+    def create_job(self, request: JobRequest) -> BabelJob:
+        job, input_book = self._reserve_job(request)
+        try:
+            input_book.write_bytes(request.content)
+        except OSError as exc:
+            self._mark_job_failed(job.job_id, exc, stage="upload")
+            raise
+        return self._prepare_reserved_job(job.job_id, request, input_book, raise_on_error=True)
+
+    def create_job_from_file_async(self, request: JobRequest, uploaded_path: Path) -> BabelJob:
+        job, input_book = self._reserve_job(request)
+        try:
+            shutil.move(str(uploaded_path), input_book)
+        except Exception as exc:
+            try:
+                uploaded_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return self._mark_job_failed(job.job_id, exc, stage="upload")
+        thread = threading.Thread(
+            target=self._prepare_reserved_job,
+            args=(job.job_id, request, input_book),
+            daemon=True,
+        )
+        with self._lock:
+            self._threads[job.job_id] = thread
+        thread.start()
+        return self.get_job(job.job_id)
 
     def list_jobs(self) -> list[BabelJob]:
         with self._lock:
@@ -810,7 +919,14 @@ class BabelJobEngine:
         self._append_event(job, "glossary-autofill", job.message, filled=filled)
         return self._set_job(job)
 
-    def _mark_job_failed(self, job_id: str, error: Exception, batch: dict | None = None) -> BabelJob:
+    def _mark_job_failed(
+        self,
+        job_id: str,
+        error: Exception,
+        batch: dict | None = None,
+        *,
+        stage: str = "translate",
+    ) -> BabelJob:
         error_text = str(error)
 
         def mutate(job: BabelJob) -> None:
@@ -825,6 +941,15 @@ class BabelJobEngine:
             ):
                 job.failed_batches.append(failed_batch)
             job.errors.append(error_text)
+            job.diagnostics.append(
+                diagnose_error(
+                    error,
+                    stage=stage,
+                    filename=job.filename,
+                    input_format=job.input_format,
+                    batch=failed_batch,
+                )
+            )
             job.message = f"Failed: {error_text}"
             batch_label = f" batch {failed_batch['batch']}" if failed_batch else ""
             self._append_event(job, "failed", f"Failed{batch_label}: {error_text}", batch=failed_batch)
@@ -857,33 +982,58 @@ class BabelJobEngine:
         auto_title_enabled: bool = False,
         batch_filter: list[int] | None = None,
     ) -> BabelJob:
-        try:
-            validate_provider_settings(settings)
-        except ValueError as exc:
-            self._mark_job_failed(job_id, exc)
-            raise
-        thread = threading.Thread(
-            target=self.run_job,
-            args=(job_id, settings, resume, ai_qa_enabled, auto_title_enabled, batch_filter),
-            daemon=True,
-        )
         with self._lock:
             if job_id not in self._jobs:
                 raise KeyError(job_id)
-            job = self._jobs[job_id]
+            start_lock = self._start_locks.setdefault(job_id, threading.Lock())
+
+        # Serialize the complete check/validate/start transition for each job. Without
+        # this lock, a duplicate request with invalid settings can mark an already
+        # running job as failed while its original worker continues writing output.
+        with start_lock:
+            job = self.get_job(job_id)
             if job.status == "running":
                 return job
-            job.status = "running"
-            job.current_batch = None
-            job.active_batches = []
-            job.failed_batch = None
-            job.failed_batches = []
-            job.message = "Starting translation job."
-            self._append_event(job, "run-starting", job.message)
-            self._threads[job_id] = thread
-            self._save_job(job)
-        thread.start()
-        return self.get_job(job_id)
+            if job.status == "preparing":
+                raise ValueError(
+                    "The source file is still being prepared. Wait for preparation to finish before starting."
+                )
+            manifest_path = job.work_dir / "pipeline" / "batch_manifest.json"
+            if job.block_count <= 0 or not manifest_path.exists():
+                raise ValueError(
+                    "This source file was not prepared successfully. Review its diagnostic and upload it again."
+                )
+            if job.status == "completed":
+                raise ValueError("This translation job is already completed.")
+            try:
+                resolved_settings, _ = resolve_execution_plan(job.adaptive_plan, settings)
+                validate_provider_settings(resolved_settings)
+            except ValueError as exc:
+                self._mark_job_failed(job_id, exc, stage="settings")
+                raise
+
+            thread = threading.Thread(
+                target=self.run_job,
+                args=(job_id, settings, resume, ai_qa_enabled, auto_title_enabled, batch_filter),
+                daemon=True,
+            )
+            with self._lock:
+                job = self._jobs[job_id]
+                job.status = "running"
+                job.current_batch = None
+                job.active_batches = []
+                job.failed_batch = None
+                job.failed_batches = []
+                job.message = "Starting translation job."
+                self._append_event(job, "run-starting", job.message)
+                self._threads[job_id] = thread
+                self._save_job(job)
+            try:
+                thread.start()
+            except RuntimeError as exc:
+                self._mark_job_failed(job_id, exc, stage="translate")
+                raise
+            return self.get_job(job_id)
 
     def _translate_batch_with_retries(
         self,
@@ -983,6 +1133,27 @@ class BabelJobEngine:
         glossary: str,
         context: str,
     ) -> list[dict]:
+        if len(rows) == 1:
+            split_row = self._split_oversized_simple_row(job_id, batch, rows[0])
+            if split_row:
+                translated_parts = self._translate_rows_with_safety_fallback(
+                    job_id,
+                    settings,
+                    provider,
+                    batch,
+                    split_row,
+                    glossary,
+                    context,
+                )
+                translated_text = " ".join(
+                    element_text(parse_snippet(str(part.get("translated_html", ""))))
+                    for part in translated_parts
+                ).strip()
+                source_root = parse_snippet(str(rows[0].get("source_html", "")))
+                merged_root = ET.Element(source_root.tag, dict(source_root.attrib))
+                merged_root.text = translated_text
+                return [{"id": rows[0]["id"], "translated_html": element_to_snippet(merged_root)}]
+
         try:
             return self._provider_translate_once(
                 job_id,
@@ -995,18 +1166,29 @@ class BabelJobEngine:
                 batch=batch,
             )
         except Exception as exc:
-            if len(rows) <= 1 or not is_provider_safety_rejection(exc):
+            lowered = str(exc).lower()
+            split_worthy = (
+                is_provider_safety_rejection(exc)
+                or is_retryable_translation_output_error(exc)
+                or isinstance(exc, TimeoutError)
+                or "timed out" in lowered
+                or "timeout" in lowered
+                or "context" in lowered
+                or "request too large" in lowered
+                or "too many tokens" in lowered
+            )
+            if len(rows) <= 1 or not split_worthy:
                 raise
 
-        chunk_size = 1
+        chunk_size = max(1, len(rows) // 2)
 
         def split_event(job: BabelJob) -> None:
             self._append_event(
                 job,
                 "batch-split",
                 (
-                    f"Provider rejected batch {batch['batch']} as high risk; "
-                    f"retrying {len(rows)} rows in chunks of {chunk_size}."
+                    f"Batch {batch['batch']} could not complete at its current size; "
+                    f"retrying {len(rows)} rows in smaller chunks."
                 ),
                 batch=batch,
                 chunk_size=chunk_size,
@@ -1028,6 +1210,49 @@ class BabelJobEngine:
                 )
             )
         return translated
+
+    def _split_oversized_simple_row(self, job_id: str, batch: dict, row: dict) -> list[dict]:
+        job = self.get_job(job_id)
+        char_limit = adaptive_batch_char_limit(job.adaptive_plan)
+        source_html = str(row.get("source_html", ""))
+        if len(source_html) <= char_limit:
+            return []
+        try:
+            root = parse_snippet(source_html)
+        except ValueError:
+            return []
+        if list(root):
+            return []
+        source_text = str(root.text or row.get("source_text", "")).strip()
+        chunks = split_text_chunks(source_text, char_limit)
+        if len(chunks) <= 1:
+            return []
+
+        parts: list[dict] = []
+        for index, chunk in enumerate(chunks, start=1):
+            part_root = ET.Element(root.tag, dict(root.attrib))
+            part_root.text = chunk
+            parts.append(
+                {
+                    **row,
+                    "id": f"{row['id']}::part{index:03d}",
+                    "source_text": chunk,
+                    "source_html": element_to_snippet(part_root),
+                }
+            )
+
+        self._mutate_job(
+            job_id,
+            lambda current: self._append_event(
+                current,
+                "block-split",
+                f"Split one oversized source block into {len(parts)} translation requests.",
+                batch=batch,
+                source_row_id=row.get("id"),
+                part_count=len(parts),
+            ),
+        )
+        return parts
 
     def _run_ai_quality_checks(
         self,
@@ -1262,11 +1487,12 @@ class BabelJobEngine:
         batch_filter: list[int] | None = None,
     ) -> BabelJob:
         try:
+            job = self.get_job(job_id)
+            settings, execution_plan = resolve_execution_plan(job.adaptive_plan, settings)
             validate_provider_settings(settings)
             # Catch provider setup failures before marking the job as actively translating.
             provider = self.provider_factory(settings)
             memory_store = self._memory_store_for(settings)
-            job = self.get_job(job_id)
             pipeline_dir = job.work_dir / "pipeline"
             translated_dir = pipeline_dir / "translated"
             translated_dir.mkdir(parents=True, exist_ok=True)
@@ -1279,7 +1505,12 @@ class BabelJobEngine:
             batch_filter_set = {int(value) for value in (batch_filter or []) if int(value) > 0} or None
             valid_resume_batches = self._valid_resume_batch_numbers(pipeline_dir, manifest) if resume or batch_filter_set else set()
             max_concurrency = normalize_max_concurrency(settings.max_concurrency)
-            self._mutate_job(job_id, lambda current: setattr(current, "usage_summary", {}))
+            def apply_execution_plan(current: BabelJob) -> None:
+                current.usage_summary = {}
+                current.adaptive_plan = dict(current.adaptive_plan or {})
+                current.adaptive_plan["execution"] = execution_plan
+
+            self._mutate_job(job_id, apply_execution_plan)
             with self._lock:
                 self._rate_limiters.pop(job_id, None)
             if memory_store is not None:
@@ -1388,7 +1619,15 @@ class BabelJobEngine:
                 return self._mutate_job(job_id, filtered_done)
             return self._finalize_completed_job(job_id, pipeline_dir, ai_qa_enabled)
         except Exception as exc:
-            return self._mark_job_failed(job_id, exc)
+            current = self.get_job(job_id)
+            latest_event = current.events[-1]["type"] if current.events else ""
+            if latest_event == "packaging":
+                stage = "package"
+            elif latest_event.startswith("ai-qa") or latest_event == "validating":
+                stage = "audit"
+            else:
+                stage = "translate"
+            return self._mark_job_failed(job_id, exc, stage=stage)
 
 
 __all__ = ["BabelJob", "BabelJobEngine", "JobRequest", "ProviderSettings"]

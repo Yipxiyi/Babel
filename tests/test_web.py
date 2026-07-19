@@ -4,6 +4,7 @@ import json
 import os
 import unittest
 import tempfile
+import time
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -132,7 +133,10 @@ class WebTests(unittest.TestCase):
         self.assertIn("failed_batches", app_source)
         self.assertIn("Output format", app_source)
         self.assertIn("Batch character limit", app_source)
-        self.assertIn("max_chars", app_source)
+        self.assertIn("Adaptive processing", app_source)
+        self.assertIn("adaptive_enabled", app_source)
+        self.assertNotIn('name="max_chars"', app_source)
+        self.assertIn("DiagnosticPanel", app_source)
         self.assertIn("Download Book", app_source)
         self.assertIn("AZW3", app_source)
         self.assertIn("HTMLZ", app_source)
@@ -174,7 +178,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("Auto-generate output title", app_source)
         self.assertIn("onDrop", app_source)
         self.assertIn("Process terminal collapsed", app_source)
-        self.assertIn("ProgressBar value={percent}", app_source)
+        self.assertIn('isIndeterminate={job?.status === "preparing"}', app_source)
 
     def test_static_asset_resolver_serves_assets_without_path_traversal(self) -> None:
         assets = sorted((ROOT / "src" / "babel_epub" / "static" / "assets").glob("index-*.js"))
@@ -188,6 +192,7 @@ class WebTests(unittest.TestCase):
         handler = object.__new__(BabelWebHandler)
         captured = []
         handler.send_error = lambda status, message=None: captured.append((status, message))
+        handler._send_json = lambda data, status=200: captured.append((status, data))
         handler.headers = {}
         handler.rfile = BytesIO(b"")
 
@@ -206,6 +211,38 @@ class WebTests(unittest.TestCase):
         handler._create_job()
         self.assertEqual(captured[-1][0], 400)
         self.assertIn("boundary", captured[-1][1])
+
+    def test_raw_upload_streams_to_async_preparation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            payload = input_epub.read_bytes()
+            engine = BabelJobEngine(tmp_path / "jobs")
+            captured = {}
+            handler = object.__new__(BabelWebHandler)
+            handler.engine = engine
+            handler.path = (
+                "/api/jobs?filename=book.epub&target_language=Simplified+Chinese"
+                "&output_format=epub&adaptive_enabled=true"
+            )
+            handler.headers = {
+                "Content-Length": str(len(payload)),
+                "Content-Type": "application/octet-stream",
+            }
+            handler.rfile = BytesIO(payload)
+            handler._send_json = lambda data, status=200: captured.update(data=data, status=status)
+
+            handler._create_job()
+
+            self.assertEqual(captured["status"], 202)
+            job_id = captured["data"]["job"]["job_id"]
+            deadline = time.time() + 3
+            while time.time() < deadline and engine.get_job(job_id).status == "preparing":
+                time.sleep(0.01)
+            prepared = engine.get_job(job_id)
+            self.assertEqual(prepared.status, "prepared")
+            self.assertTrue(prepared.adaptive_plan["enabled"])
 
     def test_api_token_auth_blocks_api_and_download_paths_when_configured(self) -> None:
         handler = object.__new__(BabelWebHandler)

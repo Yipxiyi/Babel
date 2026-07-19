@@ -60,7 +60,9 @@ A plugin would couple Babel to one agent host. A skill alone would only document
 
 MVP is single-user and local-first. API keys are accepted at start time and are not written to durable job state.
 
-Translation runs use a `ThreadPoolExecutor` with default `max_concurrency=3` and a hard range of `1..8`. Each batch attempt creates its own provider instance. The glossary and context are read once at run start so concurrent batches share a stable snapshot.
+Web uploads stream to a temporary file and return a persisted `preparing` job immediately. Normalization, extraction, glossary generation, and the adaptive source profile run in a background thread. The profile records source size/density, chosen batch budget, estimated batch count, oversized blocks, reasons, and warnings.
+
+Translation runs use a `ThreadPoolExecutor` with a hard concurrency range of `1..8`. Adaptive jobs resolve concurrency, timeout, and retries from the source profile and provider type; custom jobs use the advanced Settings overrides. Each batch attempt creates its own provider instance. The glossary and context are read once at run start so concurrent batches share a stable snapshot.
 
 When Translation Memory is enabled, the job engine opens a per-project JSON store under `BABEL_DATA_DIR/translation_memory/` or an explicit `memory_path`. It hashes `source_html` exact snippets, validates each hit against the current source row before reuse, translates only misses, then writes validated rows back through an atomic save. This keeps the first implementation deterministic and dependency-light while leaving room for fuzzy matching later.
 
@@ -68,9 +70,9 @@ Glossary import/export is handled by a shared dependency-free converter for CSV,
 
 Batch outputs are validated before they are written. If one batch fails, the engine records a `batch-failed` event and continues the other active and queued batches. After all workers finish, any failed batch leaves the job in `failed`; resume skips existing valid outputs and reruns only missing, damaged, or invalid batches.
 
-Provider calls support a per-request timeout, retry count, shared requests-per-minute and tokens-per-minute limits, and optional budget enforcement based on estimated request cost. Timeout, HTTP 429, and HTTP 5xx are retryable; HTTP 400/401 are treated as configuration or request errors and are not retried. OpenAI-compatible and Ollama/local providers can request JSON Schema responses when structured output is enabled; returned content is still parsed by Babel's tolerant row parser so compatible providers can degrade gracefully. DeepL and Google Translate adapters preserve the same provider interface for dedicated MT services.
+Provider calls support a per-request timeout, retry count, shared requests-per-minute and tokens-per-minute limits, and optional budget enforcement based on estimated request cost. Timeout, context-limit, safety, and invalid-output failures can recursively split a batch; a simple oversized paragraph is split before the provider call and merged back into its original structural row. HTTP 429 and HTTP 5xx are retried without multiplying requests; HTTP 400/401 are treated as configuration or request errors and are not retried. OpenAI-compatible and Ollama/local providers can request JSON Schema responses when structured output is enabled; returned content is still parsed by Babel's tolerant row parser so compatible providers can degrade gracefully.
 
-Jobs persist event logs plus active and failed batch metadata so the Web UI can restore progress after refresh and resume failed translations from existing valid batch outputs.
+Jobs persist event logs, adaptive plans, active/failed batch metadata, and actionable diagnostics. Diagnostics classify failures as source-file, environment, API, Babel, or unknown issues and include remediation guidance for every input format.
 
 CI runs Python unit tests and module compilation across Python 3.11/3.12, then runs the Web behavior tests and production build on Node 22. Docker Compose validation is included when Docker is available in the runner.
 

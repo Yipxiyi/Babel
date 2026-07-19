@@ -30,7 +30,8 @@ Most quick ebook translation scripts flatten a book into text and destroy the re
 - Extracts only human-readable XHTML blocks into JSONL batches.
 - Generates a glossary scaffold, optionally seeds known-name decisions from a glossary preset, drafts missing term translations when a Web provider is configured, and creates worker instructions before translation begins.
 - Validates each translated batch before it can be applied.
-- Runs Web translations with configurable batch concurrency, timeout, retries, and failed-job resume.
+- Analyzes each uploaded book and adaptively chooses batch size, concurrency, timeout, and retries; advanced overrides remain available in Settings.
+- Splits timeout/context-limited batches and simple oversized paragraphs into smaller translation requests, then resumes from valid output.
 - Rejects common fake/placeholder translations such as `第 N 段译文`.
 - Repackages a validated EPUB intermediate with the required uncompressed `mimetype` entry.
 - Exports the final translated book as EPUB or a Calibre-backed target format.
@@ -75,7 +76,7 @@ Open:
 http://127.0.0.1:7860
 ```
 
-The Web UI lets you upload an ebook, choose the final output format, auto-draft missing glossary translations with a configured provider, import/export glossary terms from the review modal, choose concurrency/timeout/retry settings, watch terminal-style progress, resume failed jobs, and download the translated book plus report.
+The Web UI lets you upload an ebook, choose the final output format, auto-draft missing glossary translations with a configured provider, import/export glossary terms from the review modal, watch terminal-style progress, resume failed jobs, and download the translated book plus report. Adaptive processing is on by default; batch size, concurrency, timeout, and retry overrides live in the Settings modal.
 
 The top-right `Guide` button opens the recommended operation flow. The language toggle supports English and Simplified Chinese and is saved in `localStorage`.
 
@@ -143,9 +144,9 @@ The quality report combines locked-glossary repair with deterministic QA fields 
 
 Runtime controls:
 
-- `Concurrency`: default `3`, clamped to `1..8`.
-- `Request timeout`: default `300` seconds.
-- `Retries`: default `1`; retryable failures are timeout, HTTP 429, and HTTP 5xx. HTTP 400/401 are not retried.
+- `Adaptive processing`: default on. Babel profiles the extracted source and provider type, then chooses batch size, concurrency, timeout, and retries.
+- `Batch character limit`, `Concurrency`, `Request timeout`, and `Retries`: advanced overrides used when adaptive processing is off.
+- Timeout, context-limit, safety, and invalid-output failures can trigger progressively smaller requests. HTTP 429 and HTTP 5xx use bounded retries; HTTP 400/401 are not retried.
 - `Requests / min` and `Tokens / min`: optional provider rate limits shared by the job.
 - `Budget limit` plus input/output cost per 1M tokens: optional spend guard. Babel estimates each request before it is sent, stops before crossing the budget, and failed jobs can be resumed after raising the limit.
 - Failed batches continue to be recorded while other batches keep running. After all workers finish, use `Resume Translation` to rerun only missing, damaged, invalid, or budget-stopped batch outputs.
@@ -153,7 +154,7 @@ Runtime controls:
 Security and upload controls:
 
 - `BABEL_WEB_TOKEN`: optional bearer token for all `/api/*` routes, including downloads. Send `Authorization: Bearer <token>` or `X-Babel-Token: <token>`. The token is never returned by `/api/meta` or provider settings responses.
-- `BABEL_MAX_UPLOAD_MB`: maximum upload size in megabytes. Default: `200`. Oversized uploads return HTTP 413 before multipart parsing.
+- `BABEL_MAX_UPLOAD_MB`: maximum upload size in megabytes. Default: `200`. Oversized uploads return HTTP 413 before processing; the Web client streams accepted files to disk and prepares them asynchronously.
 - `BABEL_CONVERSION_TIMEOUT`: Calibre `ebook-convert` timeout in seconds for conversion-backed input or output. Default: `600`.
 
 ## CLI Quick Start

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  buildPrepareFormData,
+  buildPrepareUploadUrl,
   canUseProvider,
   glossaryStats,
   hasGlossaryWarnings,
@@ -19,6 +19,8 @@ const provider = {
   max_concurrency: "4",
   request_timeout: "450",
   max_retries: "3",
+  adaptive_enabled: true,
+  batch_char_limit: "6000",
   structured_output_enabled: true,
   memory_enabled: true,
   memory_project_id: " series-a ",
@@ -31,36 +33,33 @@ const provider = {
   auto_title_enabled: true,
 };
 
-test("prepare upload form includes ebook metadata and optional max_chars", async () => {
-  const body = buildPrepareFormData(
+test("adaptive upload URL includes metadata without manual batch parameters", () => {
+  const url = buildPrepareUploadUrl(
     {
       target_language: "Simplified Chinese",
       title: "示例书",
       language: "zh-CN",
       output_format: "epub",
-      max_chars: " 1800 ",
     },
-    new Blob(["epub-bytes"], { type: "application/epub+zip" }),
+    provider,
     "sample.epub",
   );
-
-  assert.equal(body.get("target_language"), "Simplified Chinese");
-  assert.equal(body.get("title"), "示例书");
-  assert.equal(body.get("language"), "zh-CN");
-  assert.equal(body.get("output_format"), "epub");
-  assert.equal(body.get("max_chars"), "1800");
-  const uploaded = body.get("epub");
-  assert.ok(uploaded instanceof File);
-  assert.equal(uploaded.name, "sample.epub");
+  const parsed = new URL(url, "https://babel.test");
+  assert.equal(parsed.searchParams.get("filename"), "sample.epub");
+  assert.equal(parsed.searchParams.get("target_language"), "Simplified Chinese");
+  assert.equal(parsed.searchParams.get("title"), "示例书");
+  assert.equal(parsed.searchParams.get("adaptive_enabled"), "true");
+  assert.equal(parsed.searchParams.has("max_chars"), false);
 });
 
-test("prepare upload form omits blank max_chars", () => {
-  const body = buildPrepareFormData(
-    { target_language: "English", title: "", language: "en", output_format: "pdf", max_chars: "   " },
-    new Blob(["book"]),
+test("custom upload URL carries the advanced batch limit", () => {
+  const url = buildPrepareUploadUrl(
+    { target_language: "English", title: "", language: "en", output_format: "pdf" },
+    { adaptive_enabled: false, batch_char_limit: "4500" },
   );
-
-  assert.equal(body.has("max_chars"), false);
+  const parsed = new URL(url, "https://babel.test");
+  assert.equal(parsed.searchParams.get("adaptive_enabled"), "false");
+  assert.equal(parsed.searchParams.get("max_chars"), "4500");
 });
 
 test("settings payload normalizes provider controls and preserves structured output", () => {
@@ -69,6 +68,8 @@ test("settings payload normalizes provider controls and preserves structured out
   assert.equal(payload.max_concurrency, 4);
   assert.equal(payload.request_timeout, 450);
   assert.equal(payload.max_retries, 3);
+  assert.equal(payload.adaptive_enabled, true);
+  assert.equal(payload.batch_char_limit, 6000);
   assert.equal(payload.structured_output_enabled, true);
   assert.equal(payload.memory_enabled, true);
   assert.equal(payload.memory_project_id, "series-a");
