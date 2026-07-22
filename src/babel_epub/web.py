@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import __version__
+from .diagnostics import diagnose_error
 from .formats import supported_input_extensions, supported_output_extensions
 from .jobs import BabelJobEngine, JobRequest
 from .providers import (
@@ -191,11 +193,19 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, "invalid Content-Length")
             return
         if length > _max_upload_bytes():
-            self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "upload exceeds configured limit")
+            self._send_problem(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                ValueError("upload exceeds configured limit"),
+                stage="upload",
+            )
+            return
+        content_type = self.headers.get("Content-Type", "")
+        if content_type.split(";", 1)[0].strip().lower() == "application/octet-stream":
+            self._create_streamed_job(length)
             return
         try:
             form = _parse_multipart_form(
-                content_type=self.headers.get("Content-Type", ""),
+                content_type=content_type,
                 body=self.rfile.read(length),
             )
         except ValueError as exc:
@@ -218,6 +228,7 @@ class BabelWebHandler(BaseHTTPRequestHandler):
                     max_chars=_field_int(form, "max_chars"),
                     max_tokens=_field_int(form, "max_tokens"),
                     glossary_preset=_field_value(form, "glossary_preset", ""),
+                    adaptive_enabled=_field_bool(form, "adaptive_enabled", True),
                 )
             )
         except ValueError as exc:
@@ -225,13 +236,49 @@ class BabelWebHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"job": job.to_dict(include_paths=False), "glossary": self.engine.read_glossary(job.job_id)})
 
+    def _create_streamed_job(self, length: int) -> None:
+        query = parse_qs(urlparse(self.path).query)
+        filename = Path(_query_value(query, "filename", "input.epub")).name
+        upload_dir = self.engine.data_dir / ".uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix="upload-", suffix=Path(filename).suffix, dir=upload_dir, delete=False) as handle:
+                temp_path = Path(handle.name)
+                remaining = length
+                while remaining:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError("upload ended before Content-Length bytes were received")
+                    handle.write(chunk)
+                    remaining -= len(chunk)
+            request = JobRequest(
+                filename=filename,
+                target_language=_query_value(query, "target_language", "Simplified Chinese"),
+                title=_query_value(query, "title", ""),
+                language=_query_value(query, "language", "zh-CN"),
+                output_format=_query_value(query, "output_format", "epub"),
+                max_chars=_query_int(query, "max_chars"),
+                max_tokens=_query_int(query, "max_tokens"),
+                glossary_preset=_query_value(query, "glossary_preset", ""),
+                adaptive_enabled=_query_bool(query, "adaptive_enabled", True),
+            )
+            job = self.engine.create_job_from_file_async(request, temp_path)
+            temp_path = None
+        except (OSError, ValueError) as exc:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+            self._send_problem(HTTPStatus.BAD_REQUEST, exc, stage="upload", filename=filename)
+            return
+        self._send_json({"job": job.to_dict(include_paths=False)}, status=HTTPStatus.ACCEPTED)
+
     def _send_job(self, job_id: str) -> None:
         try:
             job = self.engine.get_job(job_id)
-            glossary = self.engine.read_glossary(job_id)
         except KeyError:
             self.send_error(HTTPStatus.NOT_FOUND, "job not found")
             return
+        glossary = self.engine.read_glossary(job_id) if job.glossary_path.exists() else ""
         self._send_json({"job": job.to_dict(include_paths=False), "glossary": glossary})
 
     def _send_glossary_terms(self, job_id: str) -> None:
@@ -454,6 +501,19 @@ class BabelWebHandler(BaseHTTPRequestHandler):
     def _send_json(self, data: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         self._send_bytes(json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status)
 
+    def _send_problem(
+        self,
+        status: HTTPStatus,
+        error: Exception,
+        *,
+        stage: str,
+        filename: str = "",
+    ) -> None:
+        self._send_json(
+            {"error": str(error), "diagnostic": diagnose_error(error, stage=stage, filename=filename)},
+            status=status,
+        )
+
     def _send_bytes(self, content: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -502,6 +562,8 @@ def _write_provider_settings(data_dir: Path, settings: dict) -> None:
         "budget_limit": normalize_budget_limit(settings.get("budget_limit", 0)),
         "input_cost_per_1m_tokens": normalize_cost_per_1m(settings.get("input_cost_per_1m_tokens", 0)),
         "output_cost_per_1m_tokens": normalize_cost_per_1m(settings.get("output_cost_per_1m_tokens", 0)),
+        "adaptive_enabled": bool(settings.get("adaptive_enabled", True)),
+        "batch_char_limit": _normalize_batch_char_limit(settings.get("batch_char_limit", 6000)),
     }
     path = _provider_settings_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -531,6 +593,8 @@ def _public_provider_settings(settings: dict) -> dict:
         "budget_limit": normalize_budget_limit(settings.get("budget_limit", 0)),
         "input_cost_per_1m_tokens": normalize_cost_per_1m(settings.get("input_cost_per_1m_tokens", 0)),
         "output_cost_per_1m_tokens": normalize_cost_per_1m(settings.get("output_cost_per_1m_tokens", 0)),
+        "adaptive_enabled": bool(settings.get("adaptive_enabled", True)),
+        "batch_char_limit": _normalize_batch_char_limit(settings.get("batch_char_limit", 6000)),
     }
 
 
@@ -560,6 +624,8 @@ def _merge_provider_settings(data: dict, stored: dict) -> dict:
         "budget_limit",
         "input_cost_per_1m_tokens",
         "output_cost_per_1m_tokens",
+        "adaptive_enabled",
+        "batch_char_limit",
     ):
         if merged.get(key) in (None, "") and stored.get(key) not in (None, ""):
             merged[key] = stored[key]
@@ -654,6 +720,46 @@ def _field_int(form: dict[str, FormPart], name: str) -> int | None:
     if parsed <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return parsed
+
+
+def _field_bool(form: dict[str, FormPart], name: str, default: bool) -> bool:
+    value = _field_value(form, name, "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
+def _query_value(query: dict[str, list[str]], name: str, default: str) -> str:
+    values = query.get(name)
+    return values[0] if values and values[0] != "" else default
+
+
+def _query_int(query: dict[str, list[str]], name: str) -> int | None:
+    value = _query_value(query, name, "").strip()
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
+
+
+def _query_bool(query: dict[str, list[str]], name: str, default: bool) -> bool:
+    value = _query_value(query, name, "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
+def _normalize_batch_char_limit(value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 6000
+    return min(100_000, max(1_000, parsed))
 
 
 def _glossary_export_extension(fmt: str) -> str:

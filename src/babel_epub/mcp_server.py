@@ -71,6 +71,7 @@ TOOLS = [
             "title": {"type": "string"},
             "language": {"type": "string", "default": "zh-CN"},
             "output_format": {"type": "string", "default": "epub"},
+            "adaptive_enabled": {"type": "boolean", "default": True},
             "max_chars": {"type": "integer", "description": "Optional approximate source character budget per batch."},
             "max_tokens": {"type": "integer", "description": "Optional estimated token budget per batch."},
             "glossary_preset": {"type": "string", "description": "Optional built-in preset name or JSON preset path."},
@@ -232,6 +233,10 @@ class BabelMCP:
                     max_chars=arguments.get("max_chars"),
                     max_tokens=arguments.get("max_tokens"),
                     glossary_preset=arguments.get("glossary_preset", ""),
+                    adaptive_enabled=arguments.get(
+                        "adaptive_enabled",
+                        arguments.get("max_chars") is None and arguments.get("max_tokens") is None,
+                    ) is not False,
                 )
             )
             return {"job": job.to_dict(include_paths=True), "glossary": self.engine.read_glossary(job.job_id)}

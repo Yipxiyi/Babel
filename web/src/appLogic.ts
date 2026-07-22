@@ -5,6 +5,8 @@ export type ProviderSettingsLike = {
   max_concurrency: string;
   request_timeout: string;
   max_retries: string;
+  adaptive_enabled: boolean;
+  batch_char_limit: string;
   ai_qa_enabled: boolean;
   auto_title_enabled: boolean;
   structured_output_enabled?: boolean;
@@ -23,7 +25,6 @@ export type PrepareFormLike = {
   title: string;
   language: string;
   output_format: string;
-  max_chars?: string;
 };
 
 export type GlossaryTermLike = {
@@ -66,6 +67,8 @@ export function settingsPayloadFromProvider(provider: ProviderSettingsLike, hasS
     max_concurrency: integerOption(provider.max_concurrency, 3, 1),
     request_timeout: integerOption(provider.request_timeout, 300, 1),
     max_retries: integerOption(provider.max_retries, 2, 0),
+    adaptive_enabled: provider.adaptive_enabled,
+    batch_char_limit: integerOption(provider.batch_char_limit, 6000, 1000),
     memory_project_id: String(provider.memory_project_id || "").trim(),
     max_requests_per_minute: integerOption(String(provider.max_requests_per_minute || "0"), 0, 0),
     max_tokens_per_minute: integerOption(String(provider.max_tokens_per_minute || "0"), 0, 0),
@@ -89,18 +92,23 @@ export function startPayloadFromProvider(
   };
 }
 
-export function buildPrepareFormData(form: PrepareFormLike, file: Blob, filename = "book.epub"): FormData {
-  const body = new FormData();
-  body.append("epub", file, filename);
-  body.append("target_language", form.target_language);
-  body.append("title", form.title);
-  body.append("language", form.language);
-  body.append("output_format", form.output_format);
-  const maxChars = (form.max_chars || "").trim();
-  if (maxChars) {
-    body.append("max_chars", maxChars);
+export function buildPrepareUploadUrl(
+  form: PrepareFormLike,
+  provider: Pick<ProviderSettingsLike, "adaptive_enabled" | "batch_char_limit">,
+  filename = "book.epub",
+): string {
+  const query = new URLSearchParams({
+    filename,
+    target_language: form.target_language,
+    title: form.title,
+    language: form.language,
+    output_format: form.output_format,
+    adaptive_enabled: String(provider.adaptive_enabled),
+  });
+  if (!provider.adaptive_enabled) {
+    query.set("max_chars", String(integerOption(provider.batch_char_limit, 6000, 1000)));
   }
-  return body;
+  return `/api/jobs?${query.toString()}`;
 }
 
 export function glossaryStats(terms: GlossaryTermLike[]) {

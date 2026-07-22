@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Iterable
 from xml.etree import ElementTree as ET
 
+from .adaptive import build_preparation_plan
 from .formats import convert_epub_to_output, normalize_to_epub, write_input_format_metadata, write_output_format_metadata
 from .glossary import build_glossary_terms, normalize_term, read_glossary_terms, render_glossary_markdown, should_skip_name_candidate, write_glossary_terms
 from .glossary_io import export_glossary_file, import_glossary_file, merge_glossary_terms
@@ -613,7 +614,7 @@ babel-epub validate-batch --pipeline-dir PATH/TO/pipeline --batch batches/BATCH.
 """
 
 
-def command_prepare(args: argparse.Namespace) -> None:
+def command_prepare(args: argparse.Namespace) -> dict:
     input_value = getattr(args, "input_book", None) or getattr(args, "input_epub", None)
     if not input_value:
         raise ValueError("prepare requires --input-book or --input-epub")
@@ -643,11 +644,29 @@ def command_prepare(args: argparse.Namespace) -> None:
         safe_extract(archive, src_dir)
 
     blocks = extract_blocks(src_dir, pipeline_dir)
+    adaptive_plan = build_preparation_plan(
+        filename=str(getattr(args, "source_filename", "") or input_book.name),
+        input_format=str(input_metadata.get("input_format", input_book.suffix.lower())),
+        file_size=input_book.stat().st_size,
+        blocks=blocks,
+        adaptive_enabled=bool(getattr(args, "adaptive_enabled", False)),
+        requested_batch_chars=getattr(args, "max_chars", None),
+    )
+    batch_char_limit = (
+        adaptive_plan["preparation"]["batch_char_limit"]
+        if adaptive_plan["enabled"]
+        else getattr(args, "max_chars", None)
+    )
     batches = write_batches(
         pipeline_dir,
         args.max_blocks,
-        max_chars=getattr(args, "max_chars", None),
+        max_chars=batch_char_limit,
         max_tokens=getattr(args, "max_tokens", None),
+    )
+    adaptive_plan["preparation"]["estimated_batches"] = len(batches)
+    (pipeline_dir / "adaptive_plan.json").write_text(
+        json.dumps(adaptive_plan, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
     )
     glossary_path = Path(args.glossary)
     glossary_path.write_text(
@@ -669,6 +688,12 @@ def command_prepare(args: argparse.Namespace) -> None:
         encoding="utf-8",
     )
     print(f"prepared {len(blocks)} translatable blocks in {len(batches)} batches under {work_dir}")
+    return {
+        "input_metadata": input_metadata,
+        "blocks": blocks,
+        "batches": batches,
+        "adaptive_plan": adaptive_plan,
+    }
 
 
 def structural_tokens(element: ET.Element) -> list[tuple[str, str, str]]:
