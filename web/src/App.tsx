@@ -634,7 +634,7 @@ const dictionaries = {
 
 function App() {
   const [locale, setLocale] = useState<Locale>(() => (localStorage.getItem("babel_locale") === "zh" ? "zh" : "en"));
-  const [meta, setMeta] = useState<Meta>({ version: "0.8.1", github_url: "https://github.com/Yipxiyi/Babel", supported_input_formats: [], supported_output_formats: [] });
+  const [meta, setMeta] = useState<Meta>({ version: "0.9.0", github_url: "https://github.com/Yipxiyi/Babel", supported_input_formats: [], supported_output_formats: [] });
   const [job, setJob] = useState<BabelJob | null>(null);
   const [currentJobId, setCurrentJobId] = useState("");
   const [terms, setTerms] = useState<GlossaryTerm[]>([]);
