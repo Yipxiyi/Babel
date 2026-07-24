@@ -114,7 +114,7 @@ def build_preparation_plan(
 def resolve_execution_plan(job_plan: dict, settings: "ProviderSettings") -> tuple["ProviderSettings", dict]:
     from .providers import normalize_max_concurrency, normalize_max_retries, normalize_request_timeout
 
-    if not bool(job_plan.get("enabled", True)):
+    if not bool(job_plan.get("enabled", False)):
         execution = {
             "max_concurrency": normalize_max_concurrency(settings.max_concurrency),
             "request_timeout": normalize_request_timeout(settings.request_timeout),

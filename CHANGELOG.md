@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Split parseable but incomplete or structurally invalid provider output into smaller translation requests instead of only retrying the original full batch.
+- Preserved manual concurrency, timeout, and retry settings when resuming jobs created before adaptive processing was introduced.
+- Preserved newlines, tabs, and repeated spaces when oversized `xml:space="preserve"` or preformatted source blocks are split and merged.
+
+## 0.9.0 - 2026-07-23
+
+### Added
+
+- Adaptive processing that profiles each uploaded book and selects batch size, concurrency, request timeout, and retries while keeping manual overrides in Settings.
+- Streaming Web uploads with asynchronous source preparation and persisted preparation progress.
+- Actionable diagnostics that distinguish source-file, environment, provider API, and Babel failures across supported input formats.
+
+### Changed
+
+- Translation batches now split progressively after timeouts, context limits, safety rejections, and invalid provider output, and oversized simple paragraphs are translated in smaller requests.
+- Web processing controls moved out of the upload form and into advanced Settings, with adaptive processing enabled by default.
+
 ## 0.8.1 - 2026-07-11
 
 ### Changed
