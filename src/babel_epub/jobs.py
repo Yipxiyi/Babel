@@ -72,20 +72,20 @@ GLOSSARY_AUTOFILL_BATCH_SIZE = 40
 def split_text_chunks(text: str, char_limit: int) -> list[str]:
     """Split prose near sentence/word boundaries without dropping source text."""
     target = max(500, int(char_limit) - 256)
-    remaining = text.strip()
+    start = 0
     chunks: list[str] = []
-    while len(remaining) > target:
-        window = remaining[: target + 1]
+    while len(text) - start > target:
+        window = text[start : start + target + 1]
         candidates = [match.end() for match in re.finditer(r"[。！？.!?；;]\s*|\s+", window)]
         cut = max((position for position in candidates if position >= target // 2), default=target)
-        chunk = remaining[:cut].strip()
+        chunk = text[start : start + cut]
         if not chunk:
-            chunk = remaining[:target]
+            chunk = text[start : start + target]
             cut = target
         chunks.append(chunk)
-        remaining = remaining[cut:].strip()
-    if remaining:
-        chunks.append(remaining)
+        start += cut
+    if start < len(text):
+        chunks.append(text[start:])
     return chunks
 
 
@@ -267,6 +267,8 @@ class BabelJobEngine:
         failed_batches = list(data.get("failed_batches") or ([failed_batch] if failed_batch else []))
         events = list(data.get("events") or default_events(data, failed_batch))
         last_active_at = data.get("last_active_at") or (events[-1]["ts"] if events else utc_now())
+        adaptive_plan = dict(data.get("adaptive_plan") or {})
+        adaptive_enabled = bool(data.get("adaptive_enabled", adaptive_plan.get("enabled", False)))
         return BabelJob(
             job_id=data["job_id"],
             status=data["status"],
@@ -308,8 +310,8 @@ class BabelJobEngine:
             generated_title=data.get("generated_title", ""),
             title_source=data.get("title_source", "manual"),
             glossary_preset=data.get("glossary_preset", ""),
-            adaptive_enabled=bool(data.get("adaptive_enabled", True)),
-            adaptive_plan=dict(data.get("adaptive_plan") or {}),
+            adaptive_enabled=adaptive_enabled,
+            adaptive_plan=adaptive_plan,
             diagnostics=list(data.get("diagnostics") or []),
         )
 
@@ -1145,17 +1147,17 @@ class BabelJobEngine:
                     glossary,
                     context,
                 )
-                translated_text = " ".join(
-                    element_text(parse_snippet(str(part.get("translated_html", ""))))
+                translated_text = "".join(
+                    "".join(parse_snippet(str(part.get("translated_html", ""))).itertext())
                     for part in translated_parts
-                ).strip()
+                )
                 source_root = parse_snippet(str(rows[0].get("source_html", "")))
                 merged_root = ET.Element(source_root.tag, dict(source_root.attrib))
                 merged_root.text = translated_text
                 return [{"id": rows[0]["id"], "translated_html": element_to_snippet(merged_root)}]
 
         try:
-            return self._provider_translate_once(
+            translated_rows = self._provider_translate_once(
                 job_id,
                 settings,
                 provider,
@@ -1165,6 +1167,11 @@ class BabelJobEngine:
                 "translation",
                 batch=batch,
             )
+            translated_rows = repair_translated_rows_structure(rows, translated_rows)
+            issues = validate_translation_rows(rows, translated_rows)
+            if issues:
+                raise ValueError("provider output has validation issues:\n" + "\n".join(issues[:20]))
+            return translated_rows
         except Exception as exc:
             lowered = str(exc).lower()
             split_worthy = (
@@ -1223,7 +1230,7 @@ class BabelJobEngine:
             return []
         if list(root):
             return []
-        source_text = str(root.text or row.get("source_text", "")).strip()
+        source_text = str(root.text if root.text is not None else row.get("source_text", ""))
         chunks = split_text_chunks(source_text, char_limit)
         if len(chunks) <= 1:
             return []

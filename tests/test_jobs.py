@@ -25,7 +25,7 @@ from babel_epub.providers import (
     repair_translated_row_structure,
 )
 from babel_epub.glossary import render_glossary_markdown, read_glossary_terms
-from babel_epub.pipeline import read_jsonl
+from babel_epub.pipeline import element_to_snippet, parse_snippet, read_jsonl
 from test_pipeline import make_minimal_epub
 
 
@@ -799,27 +799,34 @@ class JobEngineTests(unittest.TestCase):
             self.assertEqual(finished.status, "completed")
             self.assertIn("batch-split", [event["type"] for event in finished.events])
 
-    def test_validation_failure_is_retried_and_can_complete(self) -> None:
-        class MissingRowOnceProvider(FakeProvider):
-            calls = 0
+    def test_validation_failure_splits_batch_and_can_complete(self) -> None:
+        class MissingRowsFromLargeBatchProvider(FakeProvider):
+            large_calls = 0
+            single_row_calls = 0
 
             def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
-                type(self).calls += 1
                 translated = super().translate_batch(rows, glossary, context)
-                if type(self).calls == 1:
+                if len(rows) > 1:
+                    type(self).large_calls += 1
                     return translated[:1]
+                type(self).single_row_calls += 1
                 return translated
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             input_epub = tmp_path / "input.epub"
-            make_minimal_epub(input_epub)
-            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=lambda _settings: MissingRowOnceProvider())
+            make_epub_with_paragraphs(input_epub, paragraph_count=3)
+            engine = BabelJobEngine(
+                tmp_path / "jobs",
+                provider_factory=lambda _settings: MissingRowsFromLargeBatchProvider(),
+            )
             job = engine.create_job(
                 JobRequest(
                     filename="input.epub",
                     content=input_epub.read_bytes(),
                     target_language="Simplified Chinese",
+                    max_blocks=10,
+                    adaptive_enabled=False,
                 )
             )
 
@@ -830,12 +837,79 @@ class JobEngineTests(unittest.TestCase):
                     model="fake-model",
                     target_language="Simplified Chinese",
                     max_concurrency=1,
-                    max_retries=1,
+                    max_retries=0,
                 ),
             )
 
             self.assertEqual(finished.status, "completed")
-            self.assertIn("batch-retry", [event["type"] for event in finished.events])
+            self.assertGreater(MissingRowsFromLargeBatchProvider.large_calls, 0)
+            self.assertGreater(MissingRowsFromLargeBatchProvider.single_row_calls, 0)
+            self.assertIn("batch-split", [event["type"] for event in finished.events])
+
+    def test_oversized_preserved_whitespace_survives_split_merge(self) -> None:
+        class WhitespacePreservingProvider(TranslationProvider):
+            def translate_batch(self, rows: list[dict], glossary: str, context: str) -> list[dict]:
+                translated: list[dict] = []
+                for row in rows:
+                    root = parse_snippet(str(row["source_html"]))
+                    source_text = "".join(root.itertext())
+                    root.text = "".join("译" if not char.isspace() else char for char in source_text)
+                    translated.append({"id": row["id"], "translated_html": element_to_snippet(root)})
+                return translated
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            base_epub = tmp_path / "base.epub"
+            input_epub = tmp_path / "preserved.epub"
+            make_minimal_epub(base_epub)
+            source_text = ("\n\tAlpha  Beta\n" * 700) + "\n  Omega\t\n"
+            chapter = (
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                f'<p xml:space="preserve">{source_text}</p>'
+                "</body></html>"
+            )
+            with zipfile.ZipFile(base_epub) as source, zipfile.ZipFile(input_epub, "w") as target:
+                for info in source.infolist():
+                    content = source.read(info.filename)
+                    if info.filename == "OEBPS/chapter1.xhtml":
+                        content = chapter.encode("utf-8")
+                    target.writestr(info, content)
+
+            engine = BabelJobEngine(
+                tmp_path / "jobs",
+                provider_factory=lambda _settings: WhitespacePreservingProvider(),
+            )
+            job = engine.create_job(
+                JobRequest(
+                    filename="preserved.epub",
+                    content=input_epub.read_bytes(),
+                    target_language="Simplified Chinese",
+                    max_chars=3_000,
+                    adaptive_enabled=False,
+                )
+            )
+            finished = engine.run_job(
+                job.job_id,
+                ProviderSettings(
+                    provider="fake",
+                    model="fake-model",
+                    target_language="Simplified Chinese",
+                    max_concurrency=1,
+                    max_retries=0,
+                ),
+                ai_qa_enabled=False,
+            )
+
+            self.assertEqual(finished.status, "completed")
+            self.assertIn("block-split", [event["type"] for event in finished.events])
+            with zipfile.ZipFile(finished.output_epub) as archive:
+                chapter_root = parse_snippet(
+                    archive.read("OEBPS/chapter1.xhtml").decode("utf-8").split("?>", 1)[-1]
+                )
+            paragraph = next(element for element in chapter_root.iter() if element.tag.endswith("p"))
+            expected = "".join("译" if not char.isspace() else char for char in source_text)
+            self.assertEqual(paragraph.text, expected)
 
     def test_provider_safety_rejection_splits_batch_into_smaller_chunks(self) -> None:
         class RejectLargeBatchProvider(FakeProvider):
@@ -1125,6 +1199,65 @@ class JobEngineTests(unittest.TestCase):
             self.assertEqual(loaded.active_batches, [])
             self.assertEqual(loaded.failed_batches, [])
             self.assertTrue(loaded.events)
+
+    def test_pre_adaptive_job_preserves_manual_execution_settings(self) -> None:
+        captured_settings: list[ProviderSettings] = []
+
+        def provider_factory(settings: ProviderSettings) -> FakeProvider:
+            captured_settings.append(settings)
+            return FakeProvider()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_epub = tmp_path / "input.epub"
+            make_minimal_epub(input_epub)
+            engine = BabelJobEngine(tmp_path / "jobs", provider_factory=provider_factory)
+            job = engine.create_job(
+                JobRequest(
+                    filename="input.epub",
+                    content=input_epub.read_bytes(),
+                    target_language="Simplified Chinese",
+                )
+            )
+            state_path = job.work_dir / "job.json"
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            data.pop("adaptive_enabled", None)
+            data.pop("adaptive_plan", None)
+            state_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+            reloaded = BabelJobEngine(tmp_path / "jobs", provider_factory=provider_factory)
+            loaded = reloaded.get_job(job.job_id)
+            self.assertFalse(loaded.adaptive_enabled)
+            self.assertEqual(loaded.adaptive_plan, {})
+
+            finished = reloaded.run_job(
+                job.job_id,
+                ProviderSettings(
+                    provider="fake",
+                    model="fake-model",
+                    target_language="Simplified Chinese",
+                    max_concurrency=1,
+                    request_timeout=900,
+                    max_retries=0,
+                ),
+                ai_qa_enabled=False,
+            )
+
+            self.assertEqual(finished.status, "completed")
+            self.assertTrue(captured_settings)
+            self.assertTrue(all(settings.max_concurrency == 1 for settings in captured_settings))
+            self.assertTrue(all(settings.request_timeout == 900 for settings in captured_settings))
+            self.assertTrue(all(settings.max_retries == 0 for settings in captured_settings))
+            self.assertEqual(
+                finished.adaptive_plan["execution"],
+                {
+                    "max_concurrency": 1,
+                    "request_timeout": 900.0,
+                    "max_retries": 0,
+                    "dynamic_batch_split": True,
+                    "reason": "Using advanced execution overrides from Settings.",
+                },
+            )
 
     def test_running_job_json_is_marked_failed_on_restart(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
