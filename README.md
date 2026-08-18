@@ -1,3 +1,5 @@
+
+
 <p align="center">
   <img src="docs/assets/brand/babel-icon.png" alt="Babel icon" width="116" height="116">
 </p>
@@ -340,6 +342,7 @@ A plugin would be the wrong abstraction for the core problem: EPUB extraction, v
 
 ```txt
 src/babel_epub/              # dependency-free core, job engine, Web server, MCP server
+web/                         # React/Vite Web UI source
 integrations/codex/babel/    # Codex skill
 integrations/claude/         # Claude Desktop MCP docs/config
 tests/                       # minimal EPUB/job/Web tests
